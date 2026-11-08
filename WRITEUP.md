@@ -36,14 +36,22 @@ Every item carries a *reason*. The panel's **Context card** shows file, line ran
 Trade-offs: lexical retrieval needs no embedding model or server, which keeps it in scope and model-agnostic. It is deterministic and explainable. It misses pure synonyms, which the agent compensates for with `search_code` and sub-agent exploration.
 
 ## 5. Model setup
-**[TODO]** List every model used, where it ran and the approximate cost. For example:
+Every model is configured in TrueForge, never in the extension. Anvil only refers to models by TrueForge id.
+
 | Role | Model | Where | Cost |
 |---|---|---|---|
-| Primary | [TODO] | [TODO, e.g. Gemini API free tier] | [TODO] |
-| Fallback | [TODO] | [TODO] | [TODO] |
-| Task C | `broken/dead-model` (unreachable endpoint) | n/a | 0 |
+| Development and testing | `qwen3:4b`, `qwen2.5-coder:7b`, `qwen2.5:7b-instruct`, `qwen2.5:1.5b-instruct` | Ollama on a laptop RTX 4050 (6 GB), OpenAI-compatible endpoint registered as TrueForge provider `ollama` | $0 |
+| Demo primary | **[TODO]** | **[TODO]** | **[TODO]** |
+| Demo fallback | **[TODO]** | **[TODO]** | **[TODO]** |
+| Task C | `broken/dead-model` (custom provider at `127.0.0.1:9`, which is unreachable) | n/a | $0 |
 
-Switching models: `anvil.models` in VS Code settings, in priority order. Providers are configured in TrueForge (UI, or `scripts/register-providers.mjs` with keys from env vars).
+**Switching models.** Set `anvil.models` in VS Code settings to a priority list: the first entry is primary and the rest are automatic fallbacks. Per-model parameters go in `anvil.modelParams` (for example `{"ollama/qwen3-4b": {"reasoning_effort": "none"}}`). Providers are added in the TrueForge UI or with `scripts/register-providers.mjs`, which reads keys from env vars.
+
+**What we learned running small local models through TrueForge.** Each finding produced a product change.
+- Ollama's default 4K context silently truncated the agent prompt. We documented `OLLAMA_CONTEXT_LENGTH=16384` with flash attention and a q8 KV cache, so the model fits fully in 6 GB of VRAM.
+- `qwen2.5-coder` under Ollama prints tool calls as JSON text instead of making function calls, which silently ends the loop. Anvil now **detects text tool calls and nudges** the model to use real function calling (unit-tested).
+- Reasoning models (qwen3) can think for minutes before their first tool call. `anvil.modelParams` lets a user turn reasoning down per model. The panel streams reasoning tokens in a collapsible *Thinking* card, so the user sees progress instead of a frozen UI.
+- A cold model load caused `Headers Timeout` errors. Anvil's retry-with-backoff recovered automatically in a live run. The start scripts also raise TrueForge's model timeouts.
 
 ## 6. Scorecard
 | Criterion | Video timestamp | Claim |

@@ -164,3 +164,25 @@ test('text-printed tool call is detected and nudged (local-model robustness)', a
   assert.match(calls.inputs[1][0].content, /function-calling/);
   assert.ok(events.some((e) => e.t === 'notice' && /plain text/.test(e.text)));
 });
+
+test('live shape: tool call arrives only as streamed delta fragments → still reviewed via approval', { skip: !have }, async () => {
+  const args = JSON.stringify({ path: 'src/flask/helpers.py', old_string: 'def get_debug_flag() -> bool:', new_string: 'def get_debug_flag() -> bool:  # y' });
+  const { gw, calls } = fakeGateway(['m/1'], async (_s, input, emit) => {
+    if (input[0].type === 'user.message') {
+      const info = { type: 'mcp', name: 'edit_file', serverName: 'anvil-editor', serverId: 'anvil-editor' };
+      emit({ type: 'model.message.delta', id: 'm1', threadId: 'main', toolCalls: [{ index: 0, id: 'tcD', type: 'function', function: { name: 'edit_file', arguments: args.slice(0, 20) }, toolInfo: info }] });
+      emit({ type: 'model.message.delta', id: 'm1', threadId: 'main', toolCalls: [{ index: 0, function: { arguments: args.slice(20) } }] });
+      emit({ type: 'tool.approval_required', id: 'a', threadId: 'main', createdAt: '', toolCalls: [{ id: 'tcD', sourceEventId: 'm1' }] });
+      return done();
+    }
+    return done();
+  });
+  const events: UiEvent[] = [];
+  let reviewed = '';
+  const reviews = { cancelAll() {}, review: async (_u: any, _o: string, p: string) => ((reviewed = p), { status: 'decided', accepted: [0], rejected: [], total: 1, finalText: p, hunks: [] }) };
+  const runner = new AgentRunner(gw, reviews as any, { forRun: () => [] } as any, new RunState(), log);
+  await runner.run('coder', 'x', sinkOf(events));
+  assert.ok(reviewed.includes('# y'), 'review opened with merged args');
+  assert.ok(events.some((e) => e.t === 'tool.start' && e.name === 'edit_file'));
+  assert.deepEqual(calls.inputs[1][0].approval, { status: 'allow' });
+});

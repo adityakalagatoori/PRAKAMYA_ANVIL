@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { TrueForgeApi as TrueForge } from '@truefoundry/trueforge-sdk';
+import { TrueForgeApi as TrueForge, mergeEventDelta } from '@truefoundry/trueforge-sdk';
 import { AgentKind, TrueForgeGateway, TrueForgeUnreachable, isTransient } from './gateway';
 import { ReviewManager } from '../review/reviewManager';
 import { UndoStack } from '../review/undo';
@@ -168,43 +168,62 @@ export class AgentRunner {
       const approvals: { id: string; threadId: string }[] = [];
       let mainText = '';
       let roundToolCalls = 0;
-      const streamed = new Set<string>();
+      // Live streams carry most model output only as deltas (tool-call fragments included), so we
+      // rebuild each message with the SDK's mergeEventDelta and finalise it on finish_reason.
+      const bases = new Map<string, TrueForge.ModelMessageEvent>();
+      const finalised = new Set<string>();
+      const finalise = (msg: TrueForge.ModelMessageEvent) => {
+        if (finalised.has(msg.id)) return;
+        finalised.add(msg.id);
+        const threadId = msg.threadId ?? 'main';
+        const text = messageText(msg.content);
+        if (text || msg.toolCalls?.length) sink.emit({ t: 'message.done', threadId });
+        if (isMain(threadId) && text) output = text;
+        for (const tc of msg.toolCalls ?? []) {
+          if (!tc?.id || calls.has(tc.id)) continue;
+          roundToolCalls++;
+          const info = normaliseCall(tc, threadId);
+          calls.set(tc.id, info);
+          sink.emit({ t: 'tool.start', id: tc.id, threadId: info.threadId, name: info.name, args: info.args });
+        }
+      };
+      const flushAll = () => bases.forEach((b) => finalise(b));
       const onEvent = (ev: TrueForge.TurnStreamingEvent) => {
         switch (ev.type) {
           case 'model.message.delta': {
             if (ev.reasoningContent) sink.emit({ t: 'reasoning', threadId: ev.threadId ?? 'main', text: ev.reasoningContent });
             if (ev.content) {
-              streamed.add(ev.id);
               if (isMain(ev.threadId)) mainText += ev.content;
               sink.emit({ t: 'delta', threadId: ev.threadId ?? 'main', text: ev.content });
             }
+            let base = bases.get(ev.id);
+            if (!base) {
+              base = { type: 'model.message', id: ev.id, threadId: ev.threadId, createdAt: ev.createdAt ?? new Date().toISOString(), content: '' } as TrueForge.ModelMessageEvent;
+              bases.set(ev.id, base);
+            }
+            mergeEventDelta(base, ev);
+            if (ev.finishReason) finalise(base);
             break;
           }
           case 'model.message': {
+            // Full message (non-streaming providers, or the final form of a streamed one).
             const text = messageText(ev.content);
-            if (text && !streamed.has(ev.id)) {
-              // provider did not stream: emit the full message once
+            if (text && !bases.has(ev.id)) {
               if (isMain(ev.threadId)) mainText += text;
               sink.emit({ t: 'delta', threadId: ev.threadId ?? 'main', text });
             }
-            if (text || ev.toolCalls?.length) sink.emit({ t: 'message.done', threadId: ev.threadId ?? 'main' });
-            if (isMain(ev.threadId) && text) output = text;
-            for (const tc of ev.toolCalls ?? []) {
-              roundToolCalls++;
-              const info = normaliseCall(tc, ev.threadId ?? 'main');
-              calls.set(tc.id, info);
-              sink.emit({ t: 'tool.start', id: tc.id, threadId: info.threadId, name: info.name, args: info.args });
-            }
+            bases.set(ev.id, ev);
+            finalised.delete(ev.id); // re-finalise with complete tool calls; already-seen calls are skipped
+            finalise(ev);
             break;
           }
+          case 'tool.approval_required':
+          case 'tool.response_required':
+            flushAll(); // make sure every call's arguments are known before reviewing
+            for (const tc of ev.toolCalls) approvals.push({ id: tc.id, threadId: ev.threadId ?? 'main', ...(ev.type === 'tool.response_required' ? { question: true } : {}) } as any);
+            break;
           case 'tool.response':
             sink.emit({ t: 'tool.result', id: ev.toolCallId, content: ev.content, ok: !/^Error:/.test(ev.content) });
-            break;
-          case 'tool.approval_required':
-            for (const tc of ev.toolCalls) approvals.push({ id: tc.id, threadId: ev.threadId ?? 'main' });
-            break;
-          case 'tool.response_required':
-            for (const tc of ev.toolCalls) approvals.push({ id: tc.id, threadId: ev.threadId ?? 'main', ...{ question: true } } as any);
             break;
           case 'thread.created':
             sink.emit({ t: 'thread', threadId: ev.threadId, title: ev.title, input: ev.agentInfo?.input ?? '' });
@@ -229,6 +248,7 @@ export class AgentRunner {
         }
       };
       const state = await this.gw.streamTurn(sessionId, input, onEvent, signal);
+      flushAll();
       if (signal.aborted) return { status: 'cancelled', output };
       if (!state) return { status: 'error', message: 'Stream ended without a turn.done event', output };
       if (state.status === 'cancelled') return { status: 'cancelled', output };

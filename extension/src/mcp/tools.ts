@@ -196,8 +196,20 @@ export const TOOLS: ToolDef[] = [
       const idx = await d.index.ready();
       const dir = String(a.dir ?? '').replace(/\\/g, '/').replace(/^\.?\/?/, '').replace(/\/$/, '');
       const g = a.glob ? globToRe(a.glob) : undefined;
-      const files = [...idx.files.keys()].filter((p) => (!dir || p.startsWith(dir + '/')) && (!g || g.test(p))).sort();
-      return files.slice(0, 300).join('\n') + (files.length > 300 ? `\n… ${files.length - 300} more` : '') || 'No files.';
+      const all = [...idx.files.keys()];
+      let base = dir;
+      let note = '';
+      if (dir && !all.some((p) => p.startsWith(dir + '/'))) {
+        // Small models often drop a prefix ("flask" for "src/flask"): resolve by suffix.
+        const dirs = [...new Set(all.map((p) => p.split('/').slice(0, -1).join('/')))];
+        const cand = dirs.filter((d) => d.endsWith('/' + dir)).sort((a, b) => a.length - b.length)[0];
+        if (!cand) return `No directory "${dir}". Top-level directories: ${[...new Set(all.map((p) => p.split('/')[0]))].sort().join(', ')}`;
+        base = cand;
+        note = `(resolved "${dir}" → "${cand}")\n`;
+      }
+      const files = all.filter((p) => (!base || p.startsWith(base + '/')) && (!g || g.test(p))).sort();
+      if (!files.length) return note + 'No files.';
+      return note + files.slice(0, 300).join('\n') + (files.length > 300 ? `\n… ${files.length - 300} more` : '');
     },
   },
   {
