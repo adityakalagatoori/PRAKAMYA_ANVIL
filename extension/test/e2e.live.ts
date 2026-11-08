@@ -15,11 +15,13 @@ import { TrueForgeGateway } from '../src/trueforge/gateway';
 import { AgentRunner, UiEvent } from '../src/trueforge/runner';
 import { assembleContext, renderPack } from '../src/context/assembler';
 import { computeHunks } from '../src/review/diff';
+import { commandEnv } from '../src/mcp/tools';
 
 const WS = process.env.STUB_WORKSPACE!;
 const models = (process.env.ANVIL_MODELS ?? '').split(',').filter(Boolean);
 const task = process.env.ANVIL_TASK ?? 'B';
-(globalThis as any).__anvilConfig = { models, trueforgeUrl: process.env.TRUEFORGE_URL ?? 'http://localhost:8790', retries: 1, iterationLimit: 40 };
+(globalThis as any).__anvilConfig = { models, trueforgeUrl: process.env.TRUEFORGE_URL ?? 'http://localhost:8790', retries: 1, iterationLimit: 40, modelParams: JSON.parse(process.env.ANVIL_MODEL_PARAMS ?? '{}') };
+const BUDGET = Number(process.env.ANVIL_BUDGET ?? 6000);
 
 const log = { appendLine: (s: string) => console.log('  [log] ' + s), show() {} } as any;
 
@@ -35,6 +37,13 @@ function load(): CodeIndex {
   };
   walk(WS);
   return CodeIndex.build(out);
+}
+
+function cmdEnv() {
+  // Use a venv that has flask's deps (E2E_VENV_FROM, e.g. the pristine flask checkout) but import the edited copy.
+  const env = commandEnv(process.env.E2E_VENV_FROM ?? WS);
+  env.PYTHONPATH = join(WS, 'src');
+  return env;
 }
 
 async function main() {
@@ -75,6 +84,7 @@ async function main() {
   const sink = {
     emit: (e: UiEvent) => {
       events.push(e);
+      if (e.t === 'reasoning') return;
       if (e.t === 'delta') {
         line += e.text;
         if (line.length > 400 || e.text.includes('\n')) {
@@ -107,7 +117,7 @@ async function main() {
       task === 'B'
         ? 'Add a new built-in CLI command flask config that prints the loaded application\'s configuration as JSON, masking the values of any key containing SECRET, PASSWORD, TOKEN or KEY as "***". It must appear in flask --help, be covered by a test, and be documented alongside the other built-in commands.'
         : task;
-    const pack = assembleContext(idx, q, { budget: 6000 });
+    const pack = assembleContext(idx, q, { budget: BUDGET });
     console.log(`  [context] ${pack.items.length} items, ${pack.used}/${pack.budget} tokens: ${[...new Set(pack.items.map((i) => i.path))].join(', ')}`);
     res = await runner.run('coder', `${q}\n\n${renderPack(pack)}`, sink);
   }

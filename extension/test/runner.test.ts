@@ -147,3 +147,20 @@ test('cancellation mid-stream: stops immediately, cancels the TrueForge session,
   assert.equal(runner.isRunning, false);
   assert.equal(runs.active, undefined);
 });
+
+test('text-printed tool call is detected and nudged (local-model robustness)', async () => {
+  let turn = 0;
+  const { gw, calls } = fakeGateway(['m/1'], async (_s, input, emit) => {
+    turn++;
+    if (turn === 1) emit({ type: 'model.message.delta', id: 'x', threadId: 'main', content: '```json\n{"name": "read_file", "arguments": {"path": "a.py"}}\n```' });
+    else emit({ type: 'model.message.delta', id: 'y', threadId: 'main', content: 'ok' });
+    return done();
+  });
+  const events: UiEvent[] = [];
+  const runner = new AgentRunner(gw, { cancelAll() {} } as any, { forRun: () => [] } as any, new RunState(), log);
+  const r = await runner.run('coder', 'x', sinkOf(events));
+  assert.equal(r.status, 'done');
+  assert.equal(calls.inputs.length, 2);
+  assert.match(calls.inputs[1][0].content, /function-calling/);
+  assert.ok(events.some((e) => e.t === 'notice' && /plain text/.test(e.text)));
+});

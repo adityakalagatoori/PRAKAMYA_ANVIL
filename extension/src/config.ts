@@ -8,6 +8,7 @@ export interface AnvilConfig {
   contextBudgetTokens: number;
   retries: number;
   iterationLimit: number;
+  modelParams: Record<string, Record<string, unknown>>;
 }
 
 export function getConfig(): AnvilConfig {
@@ -20,5 +21,6 @@ export function getConfig(): AnvilConfig {
     contextBudgetTokens: c.get<number>('contextBudgetTokens') ?? 6000,
     retries: c.get<number>('retries') ?? 2,
     iterationLimit: c.get<number>('iterationLimit') ?? 60,
+    modelParams: c.get<Record<string, Record<string, unknown>>>('modelParams') ?? {},
   };
 }

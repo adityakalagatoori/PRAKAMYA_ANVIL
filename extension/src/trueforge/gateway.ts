@@ -81,7 +81,7 @@ export class TrueForgeGateway {
   /** Registers the MCP server and one agent per (kind, model slot). Idempotent; cached per config. */
   ensureSetup(force = false): Promise<void> {
     const models = this.models();
-    const key = JSON.stringify([models, this.mcp().url]);
+    const key = JSON.stringify([models, this.mcp().url, getConfig().modelParams]);
     if (!force && this.setupDone.has(key)) return this.setupDone.get(key)!;
     const p = this.doSetup(models).catch((e) => {
       this.setupDone.delete(key);
@@ -112,6 +112,8 @@ export class TrueForgeGateway {
         const name = this.agentName(kind, slot);
         const manifest = JSON.parse(JSON.stringify(tpl.manifest).replace(/\$\{MODEL\}/g, models[slot]));
         if (kind === 'coder') manifest.config.iteration_limit = getConfig().iterationLimit;
+        const extra = getConfig().modelParams[models[slot]];
+        if (extra) manifest.model.params = { ...manifest.model.params, ...extra };
         const description = tpl.description + (slot ? ` (fallback #${slot})` : '');
         const found = existing.find((a) => a.name === name);
         if (found) await this.http('PUT', `agents/${encodeURIComponent(found.id)}`, { description, manifest });

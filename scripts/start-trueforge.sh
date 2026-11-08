@@ -5,6 +5,7 @@
 set -euo pipefail
 export OUTBOUND_URL_ALLOWED_HOSTS='["127.0.0.1","localhost"]'
 # Local models can take a while to load into VRAM before the first token; allow it.
-export MODEL_HTTP_HEADERS_TIMEOUT_MS=300000
+export MODEL_HTTP_HEADERS_TIMEOUT_MS=600000
+export MODEL_HTTP_BODY_TIMEOUT_MS=900000
 if [[ "${1:-}" == "--no-network-policy" ]]; then export NETWORK_POLICY_ENABLED=false; fi
 exec npx -y @truefoundry/trueforge@latest

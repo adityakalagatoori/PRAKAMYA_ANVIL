@@ -195,6 +195,14 @@
           "type": "number",
           "default": 60,
           "description": "Max tool-loop iterations per agent turn."
+        },
+        "anvil.modelParams": {
+          "type": "object",
+          "default": {},
+          "additionalProperties": {
+            "type": "object"
+          },
+          "markdownDescription": "Per-model parameter overrides merged into the agent's `model.params`, keyed by model id. Example: `{\"ollama/qwen3-4b\": {\"reasoning_effort\": \"none\"}}` turns off long thinking for a small local reasoning model."
         }
       }
     },

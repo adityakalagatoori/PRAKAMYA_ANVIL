@@ -7,6 +7,7 @@
   const mentionsBox = $('mentions');
   let running = false;
   let currentAssistant = {}; // threadId -> element
+  let currentReasoning = {}; // threadId -> thinking card
   const toolCards = {}; // tool call id -> card
   const threadCards = {}; // subagent thread id -> card
   let mentionItems = [];
@@ -129,7 +130,21 @@
         scroll();
         break;
       }
+      case 'reasoning': {
+        let r = currentReasoning[e.threadId];
+        if (!r) {
+          r = card('Thinking', '', 'reasoning', true);
+          container(e.threadId).append(r);
+          currentReasoning[e.threadId] = r;
+        }
+        r._body.textContent += e.text;
+        r._sub.textContent = r._body.textContent.slice(-90).replace(/\s+/g, ' ');
+        scroll();
+        break;
+      }
       case 'message.done':
+        if (currentReasoning[e.threadId]) currentReasoning[e.threadId]._dot.className = 'dot ok';
+        delete currentReasoning[e.threadId];
         delete currentAssistant[e.threadId];
         break;
       case 'tool.start': {

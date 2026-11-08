@@ -1,5 +1,7 @@
 import * as vscode from 'vscode';
 import { spawn, ChildProcess } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import * as path from 'node:path';
 import { z } from 'zod';
 import { WorkspaceIndex } from '../context/workspaceIndex';
 import { assembleContext, buildRepoMap, renderPack, summarizePack } from '../context/assembler';
@@ -309,7 +311,10 @@ export class CommandTerminal implements vscode.Disposable {
     const w = (s: string) => this.writeEmitter.fire(s.replace(/\r?\n/g, '\r\n'));
     w(`\x1b[1;36m$ ${command}\x1b[0m\n`);
     return new Promise((resolve) => {
-      const p = spawn(command, { cwd: root.fsPath, shell: true, env: { ...process.env, PYTHONUNBUFFERED: '1' }, windowsHide: true });
+      const env = commandEnv(root.fsPath);
+      if (env.VIRTUAL_ENV) w(`[2m(using ${env.VIRTUAL_ENV})[0m
+`);
+      const p = spawn(command, { cwd: root.fsPath, shell: true, env, windowsHide: true });
       this.procs.add(p);
       let out = '';
       const onData = (b: Buffer) => {
@@ -347,6 +352,24 @@ export class CommandTerminal implements vscode.Disposable {
     this.killAll();
     this.terminal?.dispose();
   }
+}
+
+/** Environment for agent commands: activates the workspace virtualenv (.venv / venv / env) if present. */
+export function commandEnv(root: string): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env, PYTHONUNBUFFERED: '1' };
+  delete env.ELECTRON_RUN_AS_NODE;
+  for (const name of ['.venv', 'venv', 'env']) {
+    const dir = path.join(root, name);
+    const bin = path.join(dir, process.platform === 'win32' ? 'Scripts' : 'bin');
+    if (existsSync(path.join(bin, process.platform === 'win32' ? 'python.exe' : 'python'))) {
+      const key = Object.keys(env).find((k) => k.toLowerCase() === 'path') ?? 'PATH';
+      env[key] = bin + path.delimiter + (env[key] ?? '');
+      env.VIRTUAL_ENV = dir;
+      delete env.PYTHONHOME;
+      break;
+    }
+  }
+  return env;
 }
 
 function killTree(p: ChildProcess) {

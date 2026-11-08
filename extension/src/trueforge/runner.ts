@@ -13,6 +13,7 @@ export type UiEvent =
   | { t: 'session'; sessionId: string; url: string; agent: string; model: string; slot: number }
   | { t: 'context'; summary: unknown }
   | { t: 'delta'; threadId: string; text: string }
+  | { t: 'reasoning'; threadId: string; text: string }
   | { t: 'message.done'; threadId: string }
   | { t: 'tool.start'; id: string; threadId: string; name: string; args: unknown }
   | { t: 'tool.result'; id: string; content: string; ok: boolean }
@@ -145,7 +146,11 @@ export class AgentRunner {
     }
   }
 
+  /** Last finished run (status, model slot used) — for tests and the status bar. */
+  lastResult: RunResult | undefined;
+
   private finish(sink: RunSink, runId: string, r: RunResult): RunResult {
+    this.lastResult = r;
     sink.emit({ t: 'run.end', runId, status: r.status, message: r.message, output: r.output });
     this.runs.end(runId);
     this.current = undefined;
@@ -158,13 +163,16 @@ export class AgentRunner {
   private async loop(sessionId: string, input: TrueForge.TurnInputItem[], sink: RunSink, signal: AbortSignal): Promise<{ status: 'done' | 'cancelled' | 'error'; message?: string; output: string }> {
     const calls = new Map<string, ToolCallInfo>();
     let output = '';
+    let nudges = 0;
     for (let round = 0; round < 200; round++) {
       const approvals: { id: string; threadId: string }[] = [];
       let mainText = '';
+      let roundToolCalls = 0;
       const streamed = new Set<string>();
       const onEvent = (ev: TrueForge.TurnStreamingEvent) => {
         switch (ev.type) {
           case 'model.message.delta': {
+            if (ev.reasoningContent) sink.emit({ t: 'reasoning', threadId: ev.threadId ?? 'main', text: ev.reasoningContent });
             if (ev.content) {
               streamed.add(ev.id);
               if (isMain(ev.threadId)) mainText += ev.content;
@@ -182,6 +190,7 @@ export class AgentRunner {
             if (text || ev.toolCalls?.length) sink.emit({ t: 'message.done', threadId: ev.threadId ?? 'main' });
             if (isMain(ev.threadId) && text) output = text;
             for (const tc of ev.toolCalls ?? []) {
+              roundToolCalls++;
               const info = normaliseCall(tc, ev.threadId ?? 'main');
               calls.set(tc.id, info);
               sink.emit({ t: 'tool.start', id: tc.id, threadId: info.threadId, name: info.name, args: info.args });
@@ -230,7 +239,17 @@ export class AgentRunner {
       for (const ra of (state as TrueForge.TurnStateDone).requiredActions ?? []) {
         for (const tc of (ra as any).toolCalls ?? []) if (!approvals.some((a) => a.id === tc.id)) approvals.push({ id: tc.id, threadId: (ra as any).threadId ?? 'main' });
       }
-      if (!approvals.length) return { status: 'done', output };
+      if (!approvals.length) {
+        // Some local models (e.g. qwen2.5-coder via Ollama) print a tool call as JSON text instead of
+        // using function calling, which silently ends the loop. Detect it and nudge, at most twice.
+        if (!roundToolCalls && nudges < 2 && looksLikeTextToolCall(mainText)) {
+          nudges++;
+          sink.emit({ t: 'notice', level: 'warn', text: 'The model wrote a tool call as plain text; asking it to use real function calling…' });
+          input = [{ type: 'user.message', content: TEXT_TOOL_CALL_NUDGE }];
+          continue;
+        }
+        return { status: 'done', output };
+      }
 
       // ---- approvals: this is where TrueForge's approval gate drives Anvil's diff review ----
       const decisions: TrueForge.TurnInputItem[] = [];
@@ -293,6 +312,15 @@ export class AgentRunner {
 }
 
 const isMain = (t: string | null | undefined) => !t || t === 'main';
+
+const TOOL_NAMES = 'retrieve_context|search_code|find_symbol|read_file|list_files|repo_map|get_diagnostics|edit_file|create_file|run_command|list_tools|get_tool_info|call_tool|create_sub_agent';
+const TEXT_CALL_RE = new RegExp(String.raw`["']?(name|tool|function)["']?\s*:\s*["'](?:[\w-]+__)?(${TOOL_NAMES})["']|<tool_call>|(${TOOL_NAMES})\s*\(\s*\{`);
+export function looksLikeTextToolCall(text: string): boolean {
+  return TEXT_CALL_RE.test(text.slice(0, 4000));
+}
+const TEXT_TOOL_CALL_NUDGE =
+  'Your last reply printed a tool call as text, so nothing was executed. Do not write tool calls as JSON or code in your message. ' +
+  'Invoke the tools through the function-calling interface (for example call read_file / search_code / edit_file directly), then continue the task.';
 
 function messageText(content: unknown): string {
   if (!content) return '';

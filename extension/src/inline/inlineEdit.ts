@@ -9,7 +9,7 @@ import { getConfig } from '../config';
  * Inline edit: select code → Ctrl+Alt+K → instruction → streamed diff in the editor → per-hunk review.
  * The model runs on TrueForge (agent anvil-inline); the extension only renders and applies.
  */
-export async function inlineEdit(runner: AgentRunner, reviews: ReviewManager, index: WorkspaceIndex, log: vscode.OutputChannel, onEvent?: (e: UiEvent) => void) {
+export async function inlineEdit(runner: AgentRunner, reviews: ReviewManager, index: WorkspaceIndex, log: vscode.OutputChannel, onEvent?: (e: UiEvent) => void, preset?: { instruction?: string }) {
   const editor = vscode.window.activeTextEditor;
   if (!editor || editor.document.uri.scheme !== 'file') {
     vscode.window.showInformationMessage('Anvil: open a file and select the code to edit.');
@@ -37,7 +37,7 @@ export async function inlineEdit(runner: AgentRunner, reviews: ReviewManager, in
   const range = new vscode.Range(startLine, 0, endLine, doc.lineAt(endLine).text.length);
   editor.selection = new vscode.Selection(range.start, range.end);
 
-  const instruction = await vscode.window.showInputBox({
+  const instruction = preset?.instruction ?? await vscode.window.showInputBox({
     title: `Anvil inline edit — ${rel}:${startLine + 1}-${endLine + 1}`,
     prompt: 'Describe the change (use @file or @symbol to pull in more context)',
     placeHolder: 'e.g. Treat "off" and "n" as false as well, and update the docstring',
@@ -103,6 +103,7 @@ export async function inlineEdit(runner: AgentRunner, reviews: ReviewManager, in
   const finalRaw = raw || result.output;
   const code = normaliseIndent(extractCode(finalRaw, selected), selected).replace(/\r?\n/g, eol);
   const review = await stream.finish(before + code + after);
+  lastInlineResult = review;
   if (review.status === 'decided') {
     const msg = review.total === 0 ? 'Anvil: the model proposed no changes.' : `Anvil: applied ${review.accepted.length}/${review.total} hunk(s). Undo with Ctrl+Z or "Anvil: Undo Last Applied Change".`;
     vscode.window.showInformationMessage(msg);
@@ -141,6 +142,9 @@ function buildPrompt(idx: ReturnType<WorkspaceIndex['current']['withFile']>, rel
     `\nReturn ONLY the replacement for the <selection> in one \`\`\`${lang} code block.`,
   ].join('\n');
 }
+
+/** Last inline review result (for tests / telemetry). */
+export let lastInlineResult: unknown;
 
 /** Pulls code out of a (possibly still streaming) fenced block. */
 export function extractCode(raw: string, fallback: string): string {

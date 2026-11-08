@@ -75,7 +75,7 @@ export async function activate(ctx: vscode.ExtensionContext) {
   ctx.subscriptions.push(status, { dispose: () => clearInterval(ticker) });
 
   ctx.subscriptions.push(
-    vscode.commands.registerCommand('anvil.inlineEdit', () => inlineEdit(runner, reviews, index, log, (e) => panel.mirror(e))),
+    vscode.commands.registerCommand('anvil.inlineEdit', (preset?: { instruction?: string }) => inlineEdit(runner, reviews, index, log, (e) => panel.mirror(e), preset)),
     vscode.commands.registerCommand('anvil.openPanel', () => panel.reveal()),
     vscode.commands.registerCommand('anvil.cancel', async () => {
       if (!runner.isRunning) return;

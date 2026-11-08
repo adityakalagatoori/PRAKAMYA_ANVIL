@@ -49,6 +49,19 @@ Run **"Anvil: Register Agents & MCP Server with TrueForge"**. Anvil also does th
 1. registers its MCP server `anvil-editor` (`http://127.0.0.1:7337/mcp`, header-token auth) with `PUT /api/v1/settings/mcp-servers`, and
 2. upserts the agent definitions in [agents/](agents/), one per configured model: `anvil-coder`, `anvil-coder-fb1`, …, and `anvil-inline`, `anvil-inline-fb1`, ….
 
+### Free, fully local option (Ollama)
+This setup was tested on a 6 GB RTX 4050 laptop.
+```powershell
+# Ollama defaults to a 4K context, which truncates the agent's prompt. Raise it and keep the KV cache small enough for the GPU:
+setx OLLAMA_CONTEXT_LENGTH 16384; setx OLLAMA_FLASH_ATTENTION 1; setx OLLAMA_KV_CACHE_TYPE q8_0   # then restart Ollama
+ollama pull qwen3:4b; ollama pull qwen2.5-coder:7b
+node scripts/register-providers.mjs   # registers the "ollama" provider from examples/model-providers.example.json
+```
+```jsonc
+"anvil.models": ["ollama/qwen3-4b", "ollama/qwen25-coder-7b"]
+```
+Use a model with native function calling (qwen3) as primary. Some models, such as qwen2.5-coder under Ollama, print tool calls as text. Anvil detects that and automatically asks the model to use real function calling.
+
 ### Switching models
 Change `anvil.models`. The first entry is primary and the others are automatic fallbacks, in order. The agents are re-registered with the new models on the next run. Any model TrueForge can serve works: a catalog provider, an OpenAI-compatible endpoint, or a local Ollama model. Anvil never calls a provider directly.
 
@@ -81,13 +94,25 @@ Design details, trade-offs and the build plan: [PLAN.md](PLAN.md) and [WRITEUP.m
 | **B. Agent mode** | In the Anvil panel, paste the `flask config` instruction (no files named). The Context card shows what was retrieved and why. Review each `edit_file` diff, then approve the pytest command. Click the session link to open it in TrueForge. | `pytest tests/test_cli.py -q` passes. `flask --app <app> config` prints masked JSON. `git status` shows 3 or more files changed. |
 | **C. Resilience** | Run `node scripts/register-providers.mjs examples/task-c-broken-provider.json`, set `"anvil.models": ["broken/dead-model", "<working model>"]`, and repeat Task A. | A "falling back to …" notice appears and the edit completes on the second model. With only the broken model, a clear error appears. `git status` shows nothing changed. |
 
-## Development
+## Verification: three layers of tests
 
 ```bash
 cd extension
-npm run watch      # rebuild on change
-npm test           # 16 tests: retrieval on flask, hunks, MCP transport, runner (approval, fallback, backoff, cancel)
-STUB_WORKSPACE=/path/to/flask-3.1.3 npm test   # also runs the flask-backed MCP and approval tests
+npm test                  # unit: retrieval on flask, hunks, MCP transport, runner (approval→review, fallback, backoff, cancel, text-tool-call nudge)
+npm run test:integration  # real VS Code (isolated download): diff editor + CodeLens, accept one/reject one hunk, disk state, undo, cancel, new file + revert, panel
+STUB_WORKSPACE=<flask copy> ANVIL_MODELS=ollama/qwen3-4b ANVIL_TASK=A|B npm run e2e   # live: real TrueForge + real model, headless
+```
+
+| Layer | What it proves |
+|---|---|
+| Unit (17) | The Task B instruction retrieves `cli.py`, `test_cli.py` and `docs/cli.rst` within budget. An auth error goes straight to the fallback model. A transient error is retried after 1 s and 3 s. Cancellation stops the run and cancels the TrueForge session. `old_string` not found produces an automatic deny with a reason. |
+| Integration (7, inside VS Code) | Per-hunk CodeLens appears in the diff editor. An accepted hunk lands on disk and a rejected one does not. `Anvil: Undo` restores the file. Cancelling a review writes nothing. |
+| Live e2e | TrueForge connects to `anvil-editor` over streamable HTTP on localhost (`mcp.initialize`). Streaming, approvals and retries work against a real model. |
+
+## Development
+
+```bash
+cd extension && npm run watch   # rebuild on change; F5 = "Run Anvil on flask-3.1.3"
 ```
 
 ## Models used
