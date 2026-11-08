@@ -4,6 +4,17 @@ import { WorkspaceIndex } from '../context/workspaceIndex';
 import { assembleContext, parseMentions, renderPack, summarizePack } from '../context/assembler';
 import { UndoStack } from '../review/undo';
 import { getConfig } from '../config';
+import { computeHunks } from '../review/diff';
+
+function lineDelta(a: string, b: string) {
+  let added = 0;
+  let removed = 0;
+  for (const h of computeHunks(a, b)) {
+    added += h.newLines.length;
+    removed += h.origLines.length;
+  }
+  return { added, removed };
+}
 
 /** Webview panel for agent mode. Pure renderer + input; the loop runs on TrueForge. */
 export class AgentPanel implements vscode.WebviewViewProvider {
@@ -113,7 +124,22 @@ export class AgentPanel implements vscode.WebviewViewProvider {
       emit: (e) => {
         if (e.t === 'run.start') this.lastRunId = e.runId;
         this.post({ type: 'ui', event: e });
-        if (e.t === 'run.end') this.post({ type: 'undoState', count: this.undo.forRun(e.runId).length, runId: e.runId });
+        if (e.t === 'run.end') {
+          const entries = this.undo.forRun(e.runId);
+          this.post({ type: 'undoState', count: entries.length, runId: e.runId });
+          // Per-file summary of what actually landed on disk in this run.
+          const byFile = new Map<string, { added: number; removed: number; applies: number; created: boolean }>();
+          for (const en of entries) {
+            const f = byFile.get(en.relPath) ?? { added: 0, removed: 0, applies: 0, created: false };
+            const d = lineDelta(en.before ?? '', en.after);
+            f.added += d.added;
+            f.removed += d.removed;
+            f.applies++;
+            f.created ||= en.before === null;
+            byFile.set(en.relPath, f);
+          }
+          if (byFile.size) this.post({ type: 'changes', files: [...byFile.entries()].map(([path, v]) => ({ path, ...v })) });
+        }
       },
       approveCommand: (id, command) =>
         new Promise<boolean>((resolve) => {

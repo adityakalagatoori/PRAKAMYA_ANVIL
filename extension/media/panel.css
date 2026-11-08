@@ -57,3 +57,5 @@ button.danger { background: var(--vscode-inputValidation-errorBorder, #be1100); 
 .mentions div.sel, .mentions div:hover { background: var(--vscode-editorSuggestWidget-selectedBackground); }
 .mentions .k { color: var(--vscode-descriptionForeground); font-size: 0.85em; }
 code { font-family: var(--vscode-editor-font-family); background: var(--vscode-textCodeBlock-background); padding: 0 3px; border-radius: 3px; }
+.add { color: var(--vscode-gitDecoration-addedResourceForeground, #3fb950); }
+.del { color: var(--vscode-gitDecoration-deletedResourceForeground, #f85149); }

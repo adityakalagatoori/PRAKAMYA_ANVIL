@@ -6,7 +6,7 @@ const tests = process.argv.includes('--tests');
 
 if (tests) {
   // Bundle pure-logic tests (no vscode dependency) for node --test.
-  const entries = readdirSync('test').filter((f) => f.endsWith('.test.ts')).map((f) => `test/${f}`);
+  const entries = readdirSync('test').filter((f) => f.endsWith('.test.ts') || f.endsWith('.live.ts')).map((f) => `test/${f}`);
   await esbuild.build({
     entryPoints: entries,
     bundle: true,

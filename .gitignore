@@ -5,3 +5,4 @@ extension/out-test/
 examples/model-providers.json
 .env
 *.sqlite
+extension/.vscode-test/

@@ -246,6 +246,28 @@
       $('model').textContent = m.models.length ? m.models.join(' → ') : 'no model configured (set anvil.models)';
     } else if (m.type === 'mentionResults') showMentions(m.items);
     else if (m.type === 'undoState') $('revert').disabled = !m.count;
+    else if (m.type === 'changes') {
+      const c = card('Changes in this run', `${m.files.length} file(s) changed — all reviewed by you`, 'context', false);
+      c._dot.className = 'dot ok';
+      const t = el('table', 'ctx-table');
+      for (const f of m.files) {
+        const tr = el('tr');
+        const td = el('td', 'path');
+        const a = el('a', '', f.path);
+        a.onclick = () => vscode.postMessage({ type: 'open', path: f.path, line: 1 });
+        if (f.created) td.append(el('span', 'tag', 'new'));
+        td.append(a);
+        const stat = el('td', 'tok');
+        stat.innerHTML = '';
+        stat.append(el('span', 'add', '+' + f.added), document.createTextNode(' '), el('span', 'del', '−' + f.removed));
+        tr.append(td, el('td', 'why', f.applies + ' accepted change' + (f.applies > 1 ? 's' : '')), stat);
+        t.append(tr);
+      }
+      c._body.style.fontFamily = 'var(--vscode-font-family)';
+      c._body.append(t, el('div', 'muted', 'Undo: Ctrl+Z in the file, “Undo” (last change) or “Revert run” above.'));
+      log.append(c);
+      scroll();
+    }
     else if (m.type === 'commandDecided') {
       const b = log.querySelector(`[data-approval="${m.id}"]`);
       if (b) b.remove();

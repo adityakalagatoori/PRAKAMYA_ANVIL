@@ -117,9 +117,44 @@ export class ReviewManager implements vscode.TextDocumentContentProvider, vscode
       vscode.languages.registerCodeLensProvider({ scheme: PROPOSED_SCHEME }, this),
       vscode.commands.registerCommand('anvil.acceptHunk', (id: number, idx: number) => this.decide(id, idx, 'accepted')),
       vscode.commands.registerCommand('anvil.rejectHunk', (id: number, idx: number) => this.decide(id, idx, 'rejected')),
-      vscode.commands.registerCommand('anvil.acceptAll', (id?: number) => this.decideAll(id, 'accepted')),
-      vscode.commands.registerCommand('anvil.rejectAll', (id?: number) => this.decideAll(id, 'rejected')),
+      vscode.commands.registerCommand('anvil.acceptAll', (id?: number) => this.decideAll(typeof id === 'number' ? id : undefined, 'accepted')),
+      vscode.commands.registerCommand('anvil.rejectAll', (id?: number) => this.decideAll(typeof id === 'number' ? id : undefined, 'rejected')),
+      vscode.commands.registerCommand('anvil.acceptHunkAtCursor', () => this.decideAtCursor('accepted')),
+      vscode.commands.registerCommand('anvil.rejectHunkAtCursor', () => this.decideAtCursor('rejected')),
     );
+  }
+
+  /** Keyboard path (works even if CodeLens is disabled): decide the hunk under / after the cursor. */
+  private async decideAtCursor(kind: Decision) {
+    const ed = vscode.window.activeTextEditor;
+    let r = ed?.document.uri.scheme === PROPOSED_SCHEME ? this.reviews.get(idOf(ed.document.uri)) : undefined;
+    if (!r) r = [...this.reviews.values()].find((x) => !x.done && !x.streaming);
+    if (!r || r.done || r.streaming) return;
+    const pending = r.pending();
+    if (!pending.length) return;
+    const cursor = ed?.document.uri.scheme === PROPOSED_SCHEME ? ed.selection.active.line : -1;
+    const shown = r.shown();
+    let target = pending[0];
+    if (cursor >= 0) {
+      for (const h of pending) {
+        const s = hunkStartIn(r.hunks, shown, h);
+        const e = s + Math.max(1, h.newLines.length) - 1;
+        if (cursor <= e) {
+          target = h;
+          break;
+        }
+        target = h;
+      }
+    }
+    await this.decide(r.id, target.index, kind);
+    // Move the cursor to the next pending hunk so repeated keypresses walk the review.
+    const next = r.done ? undefined : r.pending()[0];
+    const ed2 = vscode.window.visibleTextEditors.find((e) => e.document.uri.toString() === r!.proposedUri.toString());
+    if (next && ed2) {
+      const line = hunkStartIn(r.hunks, r.shown(), next);
+      ed2.selection = new vscode.Selection(line, 0, line, 0);
+      ed2.revealRange(new vscode.Range(line, 0, line, 0), vscode.TextEditorRevealType.InCenter);
+    }
   }
 
   provideTextDocumentContent(uri: vscode.Uri): string {
@@ -138,7 +173,7 @@ export class ReviewManager implements vscode.TextDocumentContentProvider, vscode
     const lenses: vscode.CodeLens[] = [
       new vscode.CodeLens(top, { title: `$(check-all) Accept all ${pending.length} pending`, command: 'anvil.acceptAll', arguments: [r.id] }),
       new vscode.CodeLens(top, { title: '$(close-all) Reject all', command: 'anvil.rejectAll', arguments: [r.id] }),
-      new vscode.CodeLens(top, { title: `${r.title} — ${r.hunks.length - pending.length}/${r.hunks.length} decided`, command: '' }),
+      new vscode.CodeLens(top, { title: `${r.title} — ${r.hunks.length - pending.length}/${r.hunks.length} decided · Ctrl+Alt+Y / N per hunk`, command: '' }),
     ];
     const shown = r.shown();
     for (const h of pending) {

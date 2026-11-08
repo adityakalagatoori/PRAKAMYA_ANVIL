@@ -209,6 +209,11 @@ export class AgentRunner {
           case 'thread.context_compaction_finished':
             sink.emit({ t: 'compaction', phase: 'end', detail: `${(ev as any).durationMs ?? '?'}ms` });
             break;
+          case 'mcp.initialize': {
+            const servers = ((ev as any).mcpServers ?? []).map((s: any) => `${s.name} (${s.transportType ?? 'http'})`).join(', ');
+            if (servers) sink.emit({ t: 'notice', level: 'info', text: `TrueForge connected to MCP: ${servers}` });
+            break;
+          }
           case 'mcp.auth_required':
             sink.emit({ t: 'notice', level: 'error', text: 'TrueForge reports the anvil-editor MCP server needs auth. Run "Anvil: Register Agents & MCP Server with TrueForge".' });
             break;

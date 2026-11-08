@@ -18,6 +18,17 @@ export async function activate(ctx: vscode.ExtensionContext) {
   ctx.subscriptions.push(log);
   log.appendLine('Anvil activating…');
 
+  // Per-hunk Accept/Reject CodeLens lives in the diff editor, where CodeLens is off by default.
+  // Turn it on unless the user explicitly chose otherwise (keyboard/title-bar actions work regardless).
+  const diffCfg = vscode.workspace.getConfiguration('diffEditor');
+  const lensSetting = diffCfg.inspect<boolean>('codeLens');
+  if (lensSetting && lensSetting.globalValue === undefined && lensSetting.workspaceValue === undefined && !diffCfg.get<boolean>('codeLens')) {
+    await diffCfg.update('codeLens', true, vscode.ConfigurationTarget.Global).then(
+      () => log.appendLine('Enabled diffEditor.codeLens for per-hunk review'),
+      () => undefined,
+    );
+  }
+
   const undo = new UndoStack();
   const index = new WorkspaceIndex(log);
   const reviews = new ReviewManager(undo, workspaceRoot);
@@ -117,6 +128,8 @@ export async function activate(ctx: vscode.ExtensionContext) {
     .then(() => log.appendLine('[setup] TrueForge ready'))
     .catch((e) => log.appendLine(`[setup] deferred: ${(e as Error).message}`));
   log.appendLine(`Anvil ready. MCP: ${mcpInfo().url} · TrueForge: ${getConfig().trueforgeUrl} · models: ${getConfig().models.join(' → ') || '(none)'}`);
+  // Exposed for integration tests.
+  return { reviews, undo, index, runner, gateway, mcpInfo };
 }
 
 export function deactivate() {}

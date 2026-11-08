@@ -23,7 +23,8 @@ export const workspace = {
     stat: async (u: Uri) => statSync(u.fsPath),
   },
   asRelativePath: (u: Uri) => u.fsPath.slice(root.length + 1).replace(/\\/g, '/'),
-  getConfiguration: () => ({ get: () => undefined }),
+  getConfiguration: () => ({ get: (k: string) => ((globalThis as any).__anvilConfig ?? {})[k] }),
+  onDidChangeConfiguration: () => ({ dispose() {} }),
 };
 export enum DiagnosticSeverity { Error, Warning, Information, Hint }
 export const languages = { getDiagnostics: () => [] };
