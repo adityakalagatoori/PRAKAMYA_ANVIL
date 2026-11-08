@@ -160,6 +160,7 @@ export class TrueForgeGateway {
       const stream = await this.client.sessions.createTurnStream(sessionId, { input }, { abortSignal: signal });
       for await (const ev of stream) {
         if (signal.aborted) break;
+        if (process.env.ANVIL_DEBUG_EVENTS) this.log.appendLine('[event] ' + JSON.stringify(ev).slice(0, 400));
         onEvent(ev);
         if (ev.type === 'turn.done' && (ev.threadId === null || ev.threadId === undefined || ev.threadId === 'main')) done = ev.state;
       }

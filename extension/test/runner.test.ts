@@ -170,8 +170,11 @@ test('live shape: tool call arrives only as streamed delta fragments → still r
   const { gw, calls } = fakeGateway(['m/1'], async (_s, input, emit) => {
     if (input[0].type === 'user.message') {
       const info = { type: 'mcp', name: 'edit_file', serverName: 'anvil-editor', serverId: 'anvil-editor' };
+      // Live order: empty base model.message first, then deltas with the same id.
+      emit({ type: 'model.message', id: 'm1', threadId: 'main', createdAt: '' });
       emit({ type: 'model.message.delta', id: 'm1', threadId: 'main', toolCalls: [{ index: 0, id: 'tcD', type: 'function', function: { name: 'edit_file', arguments: args.slice(0, 20) }, toolInfo: info }] });
       emit({ type: 'model.message.delta', id: 'm1', threadId: 'main', toolCalls: [{ index: 0, function: { arguments: args.slice(20) } }] });
+      emit({ type: 'model.message.delta', id: 'm1', threadId: 'main', finishReason: 'tool_calls' });
       emit({ type: 'tool.approval_required', id: 'a', threadId: 'main', createdAt: '', toolCalls: [{ id: 'tcD', sourceEventId: 'm1' }] });
       return done();
     }

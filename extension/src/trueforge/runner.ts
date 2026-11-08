@@ -172,12 +172,15 @@ export class AgentRunner {
       // rebuild each message with the SDK's mergeEventDelta and finalise it on finish_reason.
       const bases = new Map<string, TrueForge.ModelMessageEvent>();
       const finalised = new Set<string>();
+      // Idempotent: may run several times per message (finish_reason, approval, turn end); each
+      // tool call is surfaced once, message.done once.
       const finalise = (msg: TrueForge.ModelMessageEvent) => {
-        if (finalised.has(msg.id)) return;
-        finalised.add(msg.id);
         const threadId = msg.threadId ?? 'main';
         const text = messageText(msg.content);
-        if (text || msg.toolCalls?.length) sink.emit({ t: 'message.done', threadId });
+        if ((text || msg.toolCalls?.length) && !finalised.has(msg.id)) {
+          finalised.add(msg.id);
+          sink.emit({ t: 'message.done', threadId });
+        }
         if (isMain(threadId) && text) output = text;
         for (const tc of msg.toolCalls ?? []) {
           if (!tc?.id || calls.has(tc.id)) continue;
@@ -206,15 +209,16 @@ export class AgentRunner {
             break;
           }
           case 'model.message': {
-            // Full message (non-streaming providers, or the final form of a streamed one).
+            // Either the (empty) base that precedes a streamed message's deltas, or a complete
+            // message from a non-streaming provider.
+            const prev = bases.get(ev.id);
             const text = messageText(ev.content);
-            if (text && !bases.has(ev.id)) {
+            if (text && !prev) {
               if (isMain(ev.threadId)) mainText += text;
               sink.emit({ t: 'delta', threadId: ev.threadId ?? 'main', text });
             }
-            bases.set(ev.id, ev);
-            finalised.delete(ev.id); // re-finalise with complete tool calls; already-seen calls are skipped
-            finalise(ev);
+            if (!prev || text || ev.toolCalls?.length) bases.set(ev.id, prev && !text && !ev.toolCalls?.length ? prev : ev);
+            if (ev.finishReason || text || ev.toolCalls?.length) finalise(bases.get(ev.id)!);
             break;
           }
           case 'tool.approval_required':

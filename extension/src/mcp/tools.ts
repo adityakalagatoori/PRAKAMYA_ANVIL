@@ -107,10 +107,11 @@ export const TOOLS: ToolDef[] = [
     kind: 'read',
     description:
       'Ranked retrieval over the whole repository (BM25 over function/class/section chunks + test/docs counterparts) under a token budget. Returns the most relevant code with the reason each piece was chosen. Use this first when you do not know where something lives.',
-    schema: { query: z.string().describe('Natural-language description of what you are looking for'), budget_tokens: z.number().int().min(300).max(8000).optional() },
+    schema: { query: z.string().describe('Natural-language description of what you are looking for'), budget_tokens: z.number().optional().describe('Token budget, 300-8000 (default 2500)') },
     async run(a, d) {
       const idx = await d.index.ready();
-      const pack = assembleContext(idx, a.query, { budget: a.budget_tokens ?? 2500, maxRepoMapTokens: 300 });
+      const budget = Math.min(8000, Math.max(300, Math.round(Number(a.budget_tokens) || 2500)));
+      const pack = assembleContext(idx, a.query, { budget, maxRepoMapTokens: 300 });
       const s = summarizePack(pack);
       const header = [`Retrieved ${s.items.length} chunks from ${new Set(s.items.map((i) => i.path)).size} files (${s.used}/${s.budget} tokens):`, ...s.items.map((i) => `- ${i.path}:${i.lines}${i.symbol ? ' ' + i.symbol : ''} — ${i.reason}`)].join('\n');
       return header + '\n\n' + renderPack(pack);
