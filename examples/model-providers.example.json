@@ -1,0 +1,36 @@
+{
+  "$comment": "Example TrueForge model providers for Anvil. Keys are NEVER stored here: each api_key is read from the named environment variable by scripts/register-providers.mjs. Copy to model-providers.json (git-ignored) to customise. Then reference models in VS Code settings as \"anvil.models\": [\"<provider name or type>/<model name>\", ...] — first is primary, the rest are automatic fallbacks. Run `node scripts/register-providers.mjs --list` afterwards to print the exact model ids TrueForge exposes.",
+  "providers": [
+    {
+      "manifest": {
+        "type": "google-gemini",
+        "auth": { "api_key": "${GEMINI_API_KEY}" },
+        "models": [
+          { "model_id": "gemini-2.5-flash", "name": "gemini-2.5-flash", "properties": { "context_length": 1048576, "max_output_tokens": 65536 } }
+        ]
+      }
+    },
+    {
+      "manifest": {
+        "type": "custom",
+        "name": "groq",
+        "base_url": "https://api.groq.com/openai/v1",
+        "auth": { "api_key": "${GROQ_API_KEY}" },
+        "models": [
+          { "model_id": "llama-3.3-70b-versatile", "name": "llama-3-3-70b", "properties": { "context_length": 131072, "max_output_tokens": 8192 } }
+        ]
+      }
+    },
+    {
+      "manifest": {
+        "type": "custom",
+        "name": "ollama",
+        "base_url": "http://127.0.0.1:11434/v1",
+        "auth": { "api_key": "ollama" },
+        "models": [
+          { "model_id": "qwen2.5-coder:7b", "name": "qwen2-5-coder-7b", "properties": { "context_length": 32768, "max_output_tokens": 4096 } }
+        ]
+      }
+    }
+  ]
+}

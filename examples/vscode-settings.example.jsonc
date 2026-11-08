@@ -1,0 +1,16 @@
+// Put these in the Flask workspace's .vscode/settings.json (or your user settings).
+{
+  // Local TrueForge (scripts/start-trueforge.*)
+  "anvil.trueforgeUrl": "http://localhost:8790",
+
+  // Models as TrueForge names them ("provider/model"); first = primary, rest = automatic fallbacks.
+  // Run `node scripts/register-providers.mjs --list` to see the exact ids.
+  "anvil.models": ["google-gemini/gemini-2.5-flash", "groq/llama-3-3-70b"],
+
+  // Task C demo: put the unreachable provider first; Anvil falls over to the next model on its own.
+  // "anvil.models": ["broken/dead-model", "google-gemini/gemini-2.5-flash"],
+
+  "anvil.contextBudgetTokens": 6000,
+  "anvil.retries": 2,
+  "anvil.mcpPort": 7337
+}

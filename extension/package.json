@@ -1,0 +1,80 @@
+{
+  "name": "anvil-agent",
+  "displayName": "Anvil — coding agent on TrueForge",
+  "description": "Editor-native coding agent whose loop runs on TrueForge: inline edits, multi-file agent mode, budgeted context assembly, per-hunk diff review, streaming and cancellation, model fallback.",
+  "version": "0.1.0",
+  "publisher": "anvil-forgeathon",
+  "license": "MIT",
+  "engines": { "vscode": "^1.90.0" },
+  "categories": ["AI", "Programming Languages"],
+  "main": "./dist/extension.js",
+  "activationEvents": ["onStartupFinished"],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        { "id": "anvil", "title": "Anvil", "icon": "media/anvil.svg" }
+      ]
+    },
+    "views": {
+      "anvil": [
+        { "type": "webview", "id": "anvil.agentPanel", "name": "Agent" }
+      ]
+    },
+    "commands": [
+      { "command": "anvil.inlineEdit", "title": "Anvil: Inline Edit Selection", "category": "Anvil" },
+      { "command": "anvil.openPanel", "title": "Anvil: Open Agent Panel", "category": "Anvil" },
+      { "command": "anvil.cancel", "title": "Anvil: Cancel Running Generation", "category": "Anvil", "icon": "$(debug-stop)" },
+      { "command": "anvil.setup", "title": "Anvil: Register Agents & MCP Server with TrueForge", "category": "Anvil" },
+      { "command": "anvil.undoLast", "title": "Anvil: Undo Last Applied Change", "category": "Anvil" },
+      { "command": "anvil.revertRun", "title": "Anvil: Revert All Changes From Last Run", "category": "Anvil" },
+      { "command": "anvil.acceptHunk", "title": "Accept hunk", "category": "Anvil" },
+      { "command": "anvil.rejectHunk", "title": "Reject hunk", "category": "Anvil" },
+      { "command": "anvil.acceptAll", "title": "Anvil: Accept All Hunks", "category": "Anvil" },
+      { "command": "anvil.rejectAll", "title": "Anvil: Reject All Hunks", "category": "Anvil" },
+      { "command": "anvil.showContext", "title": "Anvil: Preview Context Pack for a Query", "category": "Anvil" },
+      { "command": "anvil.reindex", "title": "Anvil: Rebuild Code Index", "category": "Anvil" }
+    ],
+    "keybindings": [
+      { "command": "anvil.inlineEdit", "key": "ctrl+alt+k", "mac": "cmd+alt+k", "when": "editorTextFocus" },
+      { "command": "anvil.openPanel", "key": "ctrl+alt+a", "mac": "cmd+alt+a" },
+      { "command": "anvil.cancel", "key": "ctrl+alt+backspace", "mac": "cmd+alt+backspace", "when": "anvil.running" },
+      { "command": "anvil.acceptAll", "key": "ctrl+alt+enter", "mac": "cmd+alt+enter", "when": "anvil.reviewing" },
+      { "command": "anvil.rejectAll", "key": "ctrl+alt+delete", "mac": "cmd+alt+delete", "when": "anvil.reviewing" }
+    ],
+    "configuration": {
+      "title": "Anvil",
+      "properties": {
+        "anvil.trueforgeUrl": { "type": "string", "default": "http://localhost:8790", "description": "Base URL of the local TrueForge server." },
+        "anvil.models": {
+          "type": "array", "items": { "type": "string" },
+          "default": [],
+          "description": "Models configured in TrueForge as 'provider/model', in priority order. The first is primary; the rest are automatic fallbacks."
+        },
+        "anvil.mcpPort": { "type": "number", "default": 7337, "description": "Port for Anvil's MCP server (127.0.0.1)." },
+        "anvil.mcpPublicHost": { "type": "string", "default": "127.0.0.1", "description": "Host TrueForge should use to reach Anvil's MCP server (use host.docker.internal if TrueForge runs in Docker)." },
+        "anvil.contextBudgetTokens": { "type": "number", "default": 6000, "description": "Token budget for automatically retrieved context." },
+        "anvil.retries": { "type": "number", "default": 2, "description": "Retries (with backoff) on the same model before falling back." },
+        "anvil.iterationLimit": { "type": "number", "default": 60, "description": "Max tool-loop iterations per agent turn." }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "node esbuild.mjs --tests && node --test out-test/*.cjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.2",
+    "@truefoundry/trueforge-sdk": "0.184.1",
+    "diff": "^7.0.0",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/diff": "^7.0.0",
+    "@types/node": "^22.10.0",
+    "@types/vscode": "^1.90.0",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.7.0"
+  }
+}

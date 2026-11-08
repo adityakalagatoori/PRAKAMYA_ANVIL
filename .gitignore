@@ -1,0 +1,7 @@
+node_modules/
+extension/dist/
+extension/out-test/
+*.vsix
+examples/model-providers.json
+.env
+*.sqlite
