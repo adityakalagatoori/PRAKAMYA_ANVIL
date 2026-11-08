@@ -189,3 +189,21 @@ test('live shape: tool call arrives only as streamed delta fragments → still r
   assert.ok(events.some((e) => e.t === 'tool.start' && e.name === 'edit_file'));
   assert.deepEqual(calls.inputs[1][0].approval, { status: 'allow' });
 });
+
+test('auto-continue when a change request ends without any write attempt', async () => {
+  let turn = 0;
+  const { gw, calls } = fakeGateway(['m/1'], async (_s, _input, emit) => {
+    turn++;
+    emit({ type: 'model.message.delta', id: 'x' + turn, threadId: 'main', content: 'Here is what I found…', finishReason: 'stop' });
+    return done();
+  });
+  const events: UiEvent[] = [];
+  const runner = new AgentRunner(gw, { cancelAll() {} } as any, { forRun: () => [] } as any, new RunState(), log);
+  const rr = await runner.run('coder', 'Add a config command <anvil_context>…</anvil_context>', sinkOf(events));
+  assert.equal(calls.inputs.length, 3, 'initial + 2 continues');
+  assert.match(calls.inputs[1][0].content, /implement the requested change/);
+  // A question (not a change request) does not trigger it.
+  const r2 = fakeGateway(['m/1'], async (_s, _i, emit) => (emit({ type: 'model.message.delta', id: 'q', threadId: 'main', content: 'answer', finishReason: 'stop' }), done()));
+  await new AgentRunner(r2.gw, { cancelAll() {} } as any, { forRun: () => [] } as any, new RunState(), log).run('coder', 'How does routing work?', sinkOf([]));
+  assert.equal(r2.calls.inputs.length, 1);
+});

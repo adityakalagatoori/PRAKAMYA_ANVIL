@@ -123,7 +123,7 @@ export class AgentRunner {
           }
           this.current.sessionId = sessionId;
           sink.emit({ t: 'session', sessionId, url: this.gw.sessionUrl(sessionId), agent: this.gw.agentName(kind, slot), model: models[slot], slot });
-          const res = await this.loop(sessionId, [{ type: 'user.message', content: turnInput }], sink, run.abort.signal);
+          const res = await this.loop(sessionId, [{ type: 'user.message', content: turnInput }], sink, run.abort.signal, kind === 'coder' && looksLikeChangeRequest(input));
           if (res.status === 'done') {
             if (kind === 'coder') this.conversation = { sessionId, slot };
             return this.finish(sink, runId, { ...res, sessionId, slot });
@@ -160,10 +160,12 @@ export class AgentRunner {
   }
 
   /** One request: turn → (approvals → turn)* until the agent is done, errors, or is cancelled. */
-  private async loop(sessionId: string, input: TrueForge.TurnInputItem[], sink: RunSink, signal: AbortSignal): Promise<{ status: 'done' | 'cancelled' | 'error'; message?: string; output: string }> {
+  private async loop(sessionId: string, input: TrueForge.TurnInputItem[], sink: RunSink, signal: AbortSignal, expectEdits = false): Promise<{ status: 'done' | 'cancelled' | 'error'; message?: string; output: string }> {
     const calls = new Map<string, ToolCallInfo>();
     let output = '';
     let nudges = 0;
+    let continues = 0;
+    let wroteAnything = false;
     for (let round = 0; round < 200; round++) {
       const approvals: { id: string; threadId: string }[] = [];
       let mainText = '';
@@ -187,6 +189,7 @@ export class AgentRunner {
           roundToolCalls++;
           const info = normaliseCall(tc, threadId);
           calls.set(tc.id, info);
+          if (WRITE_TOOLS.has(info.name)) wroteAnything = true;
           sink.emit({ t: 'tool.start', id: tc.id, threadId: info.threadId, name: info.name, args: info.args });
         }
       };
@@ -272,6 +275,14 @@ export class AgentRunner {
           input = [{ type: 'user.message', content: TEXT_TOOL_CALL_NUDGE }];
           continue;
         }
+        // Small models sometimes stop after exploring and report findings instead of making the
+        // change. If a change was requested and no write was even attempted, continue (max 2x).
+        if (expectEdits && !wroteAnything && continues < 2) {
+          continues++;
+          sink.emit({ t: 'notice', level: 'info', text: `No edits proposed yet — asking the agent to continue and implement the change (${continues}/2)…` });
+          input = [{ type: 'user.message', content: CONTINUE_NUDGE }];
+          continue;
+        }
         return { status: 'done', output };
       }
 
@@ -338,9 +349,16 @@ export class AgentRunner {
 const isMain = (t: string | null | undefined) => !t || t === 'main';
 
 const TOOL_NAMES = 'retrieve_context|search_code|find_symbol|read_file|list_files|repo_map|get_diagnostics|edit_file|create_file|run_command|list_tools|get_tool_info|call_tool|create_sub_agent';
-const TEXT_CALL_RE = new RegExp(String.raw`["']?(name|tool|function)["']?\s*:\s*["'](?:[\w-]+__)?(${TOOL_NAMES})["']|<tool_call>|(${TOOL_NAMES})\s*\(\s*\{`);
+const TEXT_CALL_RE = new RegExp(String.raw`["']?(name|tool|function)["']?\s*:\s*["'](?:[\w-]+__)?(${TOOL_NAMES})["']|<tool_call>|\b(${TOOL_NAMES})\s*\(\s*\{`);
 export function looksLikeTextToolCall(text: string): boolean {
   return TEXT_CALL_RE.test(text.slice(0, 4000));
+}
+const CONTINUE_NUDGE =
+  'You have only explored so far; no change has been made. Now implement the requested change yourself: read_file the exact regions, ' +
+  'then call edit_file (or create_file) for every file that must change — implementation, tests and docs. Do not just describe the change.';
+export function looksLikeChangeRequest(text: string): boolean {
+  const req = text.split('<anvil_context')[0].toLowerCase();
+  return /\b(add|implement|create|fix|change|update|modify|refactor|rename|remove|delete|replace|write|make|support|introduce|extend|convert|migrate|document)\b/.test(req);
 }
 const TEXT_TOOL_CALL_NUDGE =
   'Your last reply printed a tool call as text, so nothing was executed. Do not write tool calls as JSON or code in your message. ' +
