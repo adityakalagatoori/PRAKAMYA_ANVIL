@@ -123,6 +123,91 @@ export async function run(): Promise<void> {
     await sleep(500);
   });
 
+  // ---------- LIVE (real TrueForge + real model): Task A and Task C ----------
+  const live = process.env.ANVIL_LIVE_MODEL;
+  if (live) {
+    const TASK_A = "Treat the values 'off' and 'n' as false as well, case-insensitively, and update the docstring to list every value that is treated as false.";
+    const cfg = vscode.workspace.getConfiguration('anvil');
+    const venvPy = process.env.ANVIL_VENV_PY!;
+    const debugFlag = async () => {
+      const { execFileSync } = await import('node:child_process');
+      return execFileSync(venvPy, ['-c', 'from flask.helpers import get_debug_flag; print(get_debug_flag())'], {
+        env: { ...process.env, FLASK_DEBUG: 'off', PYTHONPATH: vscode.Uri.joinPath(root, 'src').fsPath },
+        encoding: 'utf8',
+      }).trim();
+    };
+    const selectGetDebugFlag = async () => {
+      const doc = await vscode.workspace.openTextDocument(file);
+      const ed = await vscode.window.showTextDocument(doc);
+      const idx = await api.index.ready();
+      const def = idx.findSymbol('get_debug_flag').find((d: any) => d.path === 'src/flask/helpers.py');
+      const c = idx.chunkAt(def.path, def.line);
+      ed.selection = new vscode.Selection(c.startLine - 1, 0, c.endLine - 1, doc.lineAt(c.endLine - 1).text.length);
+    };
+    /** Runs inline edit; accepts every hunk once the streamed diff turns into a review. */
+    const runInlineAndAccept = async () => {
+      await selectGetDebugFlag();
+      const p = vscode.commands.executeCommand('anvil.inlineEdit', { instruction: TASK_A });
+      const t0 = Date.now();
+      for (;;) {
+        if (api.runner.lastResult && !api.runner.isRunning && api.reviews.activeCount === 0) break; // failed / no-op
+        const ed = vscode.window.visibleTextEditors.find((e) => e.document.uri.scheme === 'anvil-proposed');
+        if (ed && !api.runner.isRunning) {
+          const lenses: vscode.CodeLens[] = await vscode.commands.executeCommand('vscode.executeCodeLensProvider', ed.document.uri);
+          if (lenses.some((l) => l.command?.title.includes('Accept all'))) {
+            await vscode.commands.executeCommand('anvil.acceptAll');
+            break;
+          }
+        }
+        if (Date.now() - t0 > 600_000) throw new Error('inline edit timed out');
+        await sleep(300);
+      }
+      await p;
+    };
+
+    await check(`LIVE Task A on ${live}: inline edit → streamed diff → accept → FLASK_DEBUG=off prints False`, async () => {
+      assert.equal(await debugFlag(), 'True', 'baseline');
+      await cfg.update('models', [live], vscode.ConfigurationTarget.Global);
+      api.runner.lastResult = undefined;
+      await runInlineAndAccept();
+      assert.equal(api.runner.lastResult?.status, 'done', JSON.stringify(api.runner.lastResult));
+      const after = await read();
+      assert.match(after, /off/);
+      assert.equal(await debugFlag(), 'False');
+      await vscode.commands.executeCommand('anvil.undoLast');
+      assert.equal(await debugFlag(), 'True', 'undo restored');
+    });
+
+    await check(`LIVE Task C: unreachable primary → automatic fallback to ${live}, edit still lands`, async () => {
+      await cfg.update('models', ['broken/dead-model', live], vscode.ConfigurationTarget.Global);
+      api.runner.lastResult = undefined;
+      await runInlineAndAccept();
+      assert.equal(api.runner.lastResult?.status, 'done', JSON.stringify(api.runner.lastResult));
+      assert.equal(api.runner.lastResult?.slot, 1, 'second model took over');
+      assert.equal(await debugFlag(), 'False');
+      await vscode.commands.executeCommand('anvil.undoLast');
+    });
+
+    await check('LIVE Task C: only the unreachable model → clear error, file untouched, editor responsive', async () => {
+      await cfg.update('models', ['broken/dead-model'], vscode.ConfigurationTarget.Global);
+      const before = await read();
+      api.runner.lastResult = undefined;
+      await selectGetDebugFlag();
+      const t0 = Date.now();
+      const p = vscode.commands.executeCommand('anvil.inlineEdit', { instruction: TASK_A });
+      // Editor stays responsive while the failing run retries.
+      const tick = Date.now();
+      await vscode.commands.executeCommand('workbench.action.focusActiveEditorGroup');
+      assert.ok(Date.now() - tick < 2000, 'UI command returned promptly during generation');
+      await p;
+      assert.equal(api.runner.lastResult?.status, 'error');
+      assert.match(api.runner.lastResult?.message ?? '', /./);
+      assert.equal(await read(), before, 'no file changed');
+      console.log(`   error after ${((Date.now() - t0) / 1000).toFixed(1)}s: ${api.runner.lastResult?.message}`);
+      await cfg.update('models', [live], vscode.ConfigurationTarget.Global);
+    });
+  }
+
   const report = results.join('\n');
   console.log('\n===== ANVIL INTEGRATION =====\n' + report + '\n=============================');
   if (results.some((r) => r.startsWith('FAIL'))) throw new Error('integration failures:\n' + report);

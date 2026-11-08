@@ -1,11 +1,11 @@
 {
-  "$comment": "Task C (resilience). Registers a provider whose endpoint is unreachable (port 9 = discard, nothing listens). Put it FIRST in anvil.models so Anvil starts on it, retries/fails over automatically to the working model behind it. Register with: node scripts/register-providers.mjs examples/task-c-broken-provider.json",
+  "$comment": "Task C (resilience). Registers a provider whose endpoint is unreachable (nothing listens on 127.0.0.1:59999, so connections are refused). Put it FIRST in anvil.models so Anvil starts on it, retries/fails over automatically to the working model behind it. Register with: node scripts/register-providers.mjs examples/task-c-broken-provider.json",
   "providers": [
     {
       "manifest": {
         "type": "custom",
         "name": "broken",
-        "base_url": "http://127.0.0.1:9/v1",
+        "base_url": "http://127.0.0.1:59999/v1",
         "auth": { "api_key": "sk-invalid-key-for-task-c" },
         "models": [{ "model_id": "dead-model", "name": "dead-model", "properties": { "context_length": 32768, "max_output_tokens": 4096 } }]
       }

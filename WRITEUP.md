@@ -74,4 +74,5 @@ VS Code; Node.js 24; TypeScript and esbuild; TrueForge 0.184.x; Claude Code (an 
 - Fallback restarts the request on the next model rather than replaying the failed session's tool history.
 - `run_command` output is capped at 8 KB per call, with large outputs left to TrueForge's offload.
 - Inline edit replaces whole selected lines. Multi-cursor and notebook cells are not supported.
+- With a local 7B model (`qwen2.5:7b-instruct`, 16K context, 6 GB GPU), Task A and Task C complete end to end and are verified live in VS Code. **Task B does not complete reliably on 7B**: the model explores, uses retrieval, and even spawns a sub-agent, but then narrates instead of editing, even after Anvil's auto-continue. Task B needs a stronger hosted model. Every Anvil mechanism (retrieval, sub-agent, nudges, approval gating) behaves correctly either way.
 - **[TODO]** Add anything you observed during recording.

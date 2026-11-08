@@ -98,16 +98,17 @@ Design details, trade-offs and the build plan: [PLAN.md](PLAN.md) and [WRITEUP.m
 
 ```bash
 cd extension
-npm test                  # unit: retrieval on flask, hunks, MCP transport, runner (approval→review, fallback, backoff, cancel, text-tool-call nudge)
+npm test                  # unit (19): retrieval on flask, hunks, MCP transport, runner (approval→review, live delta shape, fallback, backoff, cancel, nudges)
 npm run test:integration  # real VS Code (isolated download): diff editor + CodeLens, accept one/reject one hunk, disk state, undo, cancel, new file + revert, panel
+ANVIL_LIVE_MODEL=ollama/qwen25-7b ANVIL_VENV_PY=<flask>/.venv/Scripts/python.exe npm run test:integration   # + LIVE Task A and Task C
 STUB_WORKSPACE=<flask copy> ANVIL_MODELS=ollama/qwen3-4b ANVIL_TASK=A|B npm run e2e   # live: real TrueForge + real model, headless
 ```
 
 | Layer | What it proves |
 |---|---|
-| Unit (17) | The Task B instruction retrieves `cli.py`, `test_cli.py` and `docs/cli.rst` within budget. An auth error goes straight to the fallback model. A transient error is retried after 1 s and 3 s. Cancellation stops the run and cancels the TrueForge session. `old_string` not found produces an automatic deny with a reason. |
-| Integration (7, inside VS Code) | Per-hunk CodeLens appears in the diff editor. An accepted hunk lands on disk and a rejected one does not. `Anvil: Undo` restores the file. Cancelling a review writes nothing. |
-| Live e2e | TrueForge connects to `anvil-editor` over streamable HTTP on localhost (`mcp.initialize`). Streaming, approvals and retries work against a real model. |
+| Unit (19) | The Task B instruction retrieves `cli.py`, `test_cli.py` and `docs/cli.rst` within budget. An auth error goes straight to the fallback model. A transient error is retried after 1 s and 3 s. Cancellation stops the run and cancels the TrueForge session. `old_string` not found produces an automatic deny with a reason. |
+| Integration (10, inside VS Code) | Per-hunk CodeLens appears in the diff editor. An accepted hunk lands on disk and a rejected one does not. `Anvil: Undo` restores the file. Cancelling a review writes nothing. **Live Task A:** inline edit, then a streamed diff, then accept, and `FLASK_DEBUG=off` prints `False`. **Live Task C:** an unreachable primary (`ECONNREFUSED`) is retried with backoff and then falls back automatically, and the edit lands; with no fallback, a clear error appears in 4 s and the file is untouched. |
+| Live e2e (headless) | TrueForge connects to `anvil-editor` over streamable HTTP on localhost. Tool calls are rebuilt from streamed deltas. `retrieve_context`, `list_files`, `read_file` and a **dynamic sub-agent** (`explorer`) run against a real model. |
 
 ## Development
 
