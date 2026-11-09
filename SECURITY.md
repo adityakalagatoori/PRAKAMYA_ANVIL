@@ -1,6 +1,6 @@
 # Anvil security model
 
-An AI coding agent reads untrusted text (repository files, issues, tool output) and can write files and run commands. Every major AI coding tool has shipped vulnerabilities from that combination. We studied those incidents, grouped them into classes, and built a specific, tested control for each class. The controls are covered by Anvil's 35 unit tests (`npm test`), which include attack simulations against the live MCP server over HTTP.
+An AI coding agent reads untrusted text (repository files, issues, tool output) and can write files and run commands. Every major AI coding tool has shipped vulnerabilities from that combination. We studied those incidents, grouped them into classes, and built a specific, tested control for each class. The controls are covered by Anvil's 40 unit tests (`npm test`), which include attack simulations against the live MCP server over HTTP.
 
 ## Threat classes and controls
 

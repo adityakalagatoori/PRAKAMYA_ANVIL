@@ -326,6 +326,20 @@ export class ReviewManager implements vscode.TextDocumentContentProvider, vscode
     this.changeEmitter.fire(r.proposedUri);
     this.changeEmitter.fire(r.currentUri);
     this.lensEmitter.fire();
+    this.revealFirstChange(r);
+  }
+
+  /** Keep the first pending hunk in view (diffs otherwise open at line 1, far from the change). */
+  private revealFirstChange(r: Review) {
+    const first = r.streaming ? r.hunks[0] : r.pending()[0];
+    if (!first) return;
+    const line = r.streaming ? first.origStart : hunkStartIn(r.hunks, r.shown(), first);
+    if ((r as any).lastRevealed === line) return;
+    (r as any).lastRevealed = line;
+    setTimeout(() => {
+      const ed = vscode.window.visibleTextEditors.find((e) => e.document.uri.toString() === r.proposedUri.toString());
+      if (ed) ed.revealRange(new vscode.Range(Math.max(0, line - 3), 0, line + 8, 0), vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+    }, 60);
   }
 
   private rel(uri: vscode.Uri) {

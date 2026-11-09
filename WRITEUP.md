@@ -25,7 +25,7 @@ Built **from scratch**. There is no upstream fork. Libraries: `@truefoundry/true
 - Controls: a protected-path policy with modal confirmation; secret blocking and redaction; hidden-Unicode reveal; a Host/Origin-checked token server; risk-rated commands; workspace trust; a loop guard; an audit log.
 - Our own dependencies are exact-pinned and audited to 0 vulnerabilities, which meant upgrading zod (GHSA-mrhx-c7xc-m3w5, high), diff and esbuild.
 
-**Tests.** 35 unit tests (`npm test`), including attack simulations over HTTP; 10 VS Code integration tests, including live Task A (on Gemini flash-lite and local `qwen2.5:7b`) and live Task C; and a headless live e2e harness (real TrueForge and a real model) used for Task B.
+**Tests.** 40 unit tests (`npm test`), including attack simulations over HTTP; 10 VS Code integration tests, including live Task A (on Gemini flash-lite and local `qwen2.5:7b`) and live Task C; and a headless live e2e harness (real TrueForge and a real model) used for Task B.
 
 ## 4. How context is selected
 **Index.** On activation Anvil indexes the workspace and keeps the index updated with a file watcher. Flask (200 files, about 1,670 chunks) indexes in under 0.3 s. Chunks are definition-level: a Python function, class or method with its decorators attached; a docs section; or a 60-line window for other files. A symbol table and an import graph are built alongside.

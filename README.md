@@ -105,7 +105,7 @@ Design details, trade-offs and the build plan: [PLAN.md](PLAN.md) and [WRITEUP.m
 
 ```bash
 cd extension
-npm test                  # unit (35): security policy + attack simulations over HTTP, retrieval on flask, hunks, MCP transport, runner (approval→review, live delta shape, fallback, backoff, cancel, nudges)
+npm test                  # unit (40): security policy + attack simulations over HTTP, retrieval on flask, hunks, MCP transport, runner (approval→review, live delta shape, fallback, backoff, cancel, nudges)
 npm run test:integration  # real VS Code (isolated download): diff editor + CodeLens, accept one/reject one hunk, disk state, undo, cancel, new file + revert, panel
 ANVIL_LIVE_MODEL=ollama/qwen25-7b ANVIL_VENV_PY=<flask>/.venv/Scripts/python.exe npm run test:integration   # + LIVE Task A and Task C
 STUB_WORKSPACE=<flask copy> ANVIL_MODELS=ollama/qwen3-4b ANVIL_TASK=A|B npm run e2e   # live: real TrueForge + real model, headless
@@ -114,7 +114,7 @@ npm audit                 # 0 vulnerabilities; dependencies exact-pinned
 
 | Layer | What it proves |
 |---|---|
-| Unit (35) | The Task B instruction retrieves `cli.py`, `test_cli.py` and `docs/cli.rst` within budget. An auth error goes straight to the fallback model. A transient error is retried after 1 s and 3 s. Cancellation stops the run and cancels the TrueForge session. `old_string` not found produces an automatic deny with a reason. |
+| Unit (40) | The Task B instruction retrieves `cli.py`, `test_cli.py` and `docs/cli.rst` within budget. An auth error goes straight to the fallback model. A transient error is retried after 1 s and 3 s. Cancellation stops the run and cancels the TrueForge session. `old_string` not found produces an automatic deny with a reason. |
 | Integration (10, inside VS Code) | Per-hunk CodeLens appears in the diff editor. An accepted hunk lands on disk and a rejected one does not. `Anvil: Undo` restores the file. Cancelling a review writes nothing. **Live Task A** (on Gemini flash-lite and on local `qwen2.5:7b`): inline edit, then a streamed diff, then accept, and `FLASK_DEBUG=off` prints `False`; revert restores the file. **Live Task C:** an unreachable primary (`ECONNREFUSED`) is retried with backoff and then falls back automatically, and the edit lands; with no fallback, a clear error appears in about 4 s, the file is untouched and `git status` is clean. |
 | Live e2e (headless) | TrueForge connects to `anvil-editor` over streamable HTTP on localhost. Tool calls are rebuilt from streamed deltas. **Live Task B on Gemini 3.5-flash-lite:** with no files named, the agent changed `src/flask/cli.py` (`config` command registered in `FlaskGroup`), `tests/test_cli.py` (new test), `docs/cli.rst` (new "Show Configuration" section) and `src/flask/json/provider.py` (timedelta serialization); `pytest tests/test_cli.py` gives 59 passed; `flask config` masks `SECRET_KEY`, `DB_PASSWORD`, `API_TOKEN`, `STRIPE_KEY` as `***`. The session shows deferred tool loading and a dynamic sub-agent (`explorer`). |
 
