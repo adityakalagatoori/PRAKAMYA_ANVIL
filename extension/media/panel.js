@@ -276,6 +276,17 @@
       clearEmpty();
       log.append(el('div', 'msg user', m.text));
       scroll();
+    } else if (m.type === 'demoType') {
+      input.value = '';
+      input.focus();
+      let i = 0;
+      const step = () => {
+        input.value = m.text.slice(0, ++i);
+        input.scrollTop = input.scrollHeight;
+        if (i < m.text.length) setTimeout(step, 18);
+        else setTimeout(send, 600);
+      };
+      step();
     } else if (m.type === 'cleared') {
       log.replaceChildren();
       log.append(el('div', 'empty', 'New conversation.'));

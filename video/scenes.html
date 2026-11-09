@@ -1,0 +1,195 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Anvil scenes</title>
+<style>
+  :root {
+    --bg: #0b0f17; --panel: #121826; --line: #243049; --text: #e8edf7; --muted: #8a96ad;
+    --accent: #ff7a1a; --accent2: #ffb347; --ok: #3fb950; --bad: #f85149; --blue: #58a6ff; --violet: #a371f7;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: 1920px; height: 1080px; overflow: hidden; background: var(--bg); color: var(--text);
+    font-family: "Segoe UI", "Inter", system-ui, sans-serif; }
+  #stage { position: absolute; inset: 0; }
+  .bg-grid { position: absolute; inset: -200px; background-image:
+      linear-gradient(rgba(255,255,255,0.035) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255,255,255,0.035) 1px, transparent 1px);
+    background-size: 64px 64px; }
+  .glow { position: absolute; width: 1100px; height: 1100px; border-radius: 50%;
+    background: radial-gradient(circle, rgba(255,122,26,0.20), transparent 60%); filter: blur(10px); }
+  .abs { position: absolute; }
+  .title { font-size: 132px; font-weight: 800; letter-spacing: -3px; }
+  .h1 { font-size: 72px; font-weight: 750; letter-spacing: -1.5px; }
+  .h2 { font-size: 40px; font-weight: 600; }
+  .sub { font-size: 36px; color: var(--muted); font-weight: 450; }
+  .chip { display: inline-flex; align-items: center; gap: 14px; padding: 16px 28px; border-radius: 14px;
+    background: var(--panel); border: 1px solid var(--line); font-size: 32px; font-weight: 550; white-space: nowrap; }
+  .chip .dot { width: 14px; height: 14px; border-radius: 50%; background: var(--accent); }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 22px; padding: 30px 36px; }
+  .mono { font-family: "Cascadia Code", Consolas, monospace; }
+  .accent { color: var(--accent); }
+  .ok { color: var(--ok); } .bad { color: var(--bad); }
+  .tag { font-size: 22px; font-weight: 700; padding: 4px 12px; border-radius: 8px; background: rgba(248,81,73,0.15); color: var(--bad); }
+  svg text { font-family: "Segoe UI", system-ui, sans-serif; }
+</style>
+</head>
+<body>
+<div id="stage"></div>
+<script>
+// Deterministic motion graphics: render(scene, t) draws the frame for time t (seconds). No timers.
+const W = 1920, H = 1080;
+const clamp = (x, a = 0, b = 1) => Math.max(a, Math.min(b, x));
+const ease = (x) => { x = clamp(x); return x < 0.5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2; };
+const outBack = (x) => { x = clamp(x); const c1 = 1.70158, c3 = c1 + 1; return 1 + c3 * Math.pow(x - 1, 3) + c1 * Math.pow(x - 1, 2); };
+const k = (t, start, dur) => clamp((t - start) / dur);
+const stage = document.getElementById('stage');
+let DUR = 8;
+
+function frame(inner, t) {
+  const fadeIn = ease(k(t, 0, 0.5)), fadeOut = 1 - ease(k(t, DUR - 0.45, 0.45));
+  const drift = t * 6;
+  stage.innerHTML = `
+    <div class="bg-grid" style="transform: translate(${-drift}px, ${-drift * 0.6}px)"></div>
+    <div class="glow" style="left:${560 + Math.sin(t * 0.5) * 120}px; top:${-200 + Math.cos(t * 0.4) * 80}px"></div>
+    <div style="position:absolute; inset:0; opacity:${Math.min(fadeIn, fadeOut)}">${inner}</div>`;
+}
+
+function anvilMark(size, color = 'var(--accent)') {
+  return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="${color}" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"><path d="M3 7h13c0 2.5 2 4 5 4v1c-3 0-5 1-6 3h-1v2h3v3H7v-3h3v-2H9C8 13 6 12 3 12z"/></svg>`;
+}
+
+const scenes = {
+  intro(t) {
+    const a = outBack(k(t, 0.2, 0.9)), b = ease(k(t, 0.9, 0.8)), c = ease(k(t, 1.6, 0.8)), d = ease(k(t, 2.4, 0.8));
+    const sparks = Array.from({ length: 14 }, (_, i) => {
+      const p = k(t, 0.55, 1.1), ang = (i / 14) * Math.PI * 2, r = 40 + p * 260;
+      return `<div class="abs" style="left:${W / 2 + Math.cos(ang) * r}px; top:${380 + Math.sin(ang) * r * 0.6}px; width:${8 - p * 6}px; height:${8 - p * 6}px; border-radius:50%; background:var(--accent2); opacity:${1 - p}"></div>`;
+    }).join('');
+    return `
+      ${sparks}
+      <div class="abs" style="left:${W / 2 - 110}px; top:${270}px; transform: scale(${a}) rotate(${(1 - a) * -20}deg)">${anvilMark(220)}</div>
+      <div class="abs title" style="width:100%; text-align:center; top:520px; opacity:${b}; transform: translateY(${(1 - b) * 30}px)">Anvil</div>
+      <div class="abs sub" style="width:100%; text-align:center; top:690px; opacity:${c}">An editor-native coding agent for VS Code</div>
+      <div class="abs" style="width:100%; text-align:center; top:780px; opacity:${d}">
+        <span class="chip"><span class="dot"></span>agent loop on <b class="accent">&nbsp;TrueForge</b></span>
+      </div>`;
+  },
+
+  problem(t) {
+    const items = [
+      ['Loses track of the code that matters', 'context'],
+      ['Rewrites files you never asked it to touch', 'safety'],
+      ['Tricked into running code or leaking secrets', 'security'],
+    ];
+    const cves = ['CVE-2025-53773 · Copilot', 'CVE-2025-54135 · Cursor', 'CVE-2025-54136 · Cursor', 'CVE-2025-53097 · Roo Code', 'CVE-2025-49596 · MCP Inspector', 'Rules File Backdoor', 'GlassWorm', 'Amazon Q wiper prompt'];
+    const head = ease(k(t, 0.1, 0.7));
+    return `
+      <div class="abs h1" style="left:140px; top:120px; opacity:${head}; transform: translateX(${(1 - head) * -40}px)">AI coding tools keep hitting <span class="accent">the same walls</span></div>
+      ${items.map(([txt], i) => {
+        const p = ease(k(t, 1.2 + i * 1.6, 0.7));
+        return `<div class="abs card" style="left:140px; top:${300 + i * 150}px; width:980px; opacity:${p}; transform: translateX(${(1 - p) * -60}px); display:flex; gap:24px; align-items:center">
+          <div style="width:52px;height:52px;border-radius:12px;background:rgba(248,81,73,0.15);display:grid;place-items:center;font-size:30px" class="bad">✕</div>
+          <div class="h2">${txt}</div></div>`;
+      }).join('')}
+      ${cves.map((c, i) => {
+        const p = ease(k(t, 5.6 + i * 0.45, 0.6));
+        const col = i % 2, row = Math.floor(i / 2);
+        return `<div class="abs" style="left:${1200 + col * 330}px; top:${310 + row * 105}px; opacity:${p}; transform: scale(${0.8 + 0.2 * p})">
+          <span class="tag mono" style="font-size:21px">${c}</span></div>`;
+      }).join('')}`;
+  },
+
+  architecture(t) {
+    const box = (x, y, w, h, title, sub, p, color) => `
+      <div class="abs card" style="left:${x}px; top:${y}px; width:${w}px; height:${h}px; opacity:${p}; transform: translateY(${(1 - p) * 30}px); border-color:${color}">
+        <div class="h2" style="color:${color}">${title}</div><div class="sub" style="font-size:26px; margin-top:10px">${sub}</div></div>`;
+    const p1 = ease(k(t, 0.3, 0.7)), p2 = ease(k(t, 1.3, 0.7)), p3 = ease(k(t, 2.3, 0.7));
+    const flow = (t * 0.7) % 1;
+    const tools = ['retrieve_context', 'search_code', 'find_symbol', 'read_file', 'edit_file ✓review', 'create_file ✓review', 'run_command ✓approve'];
+    const pt = (i) => ease(k(t, 4.5 + i * 0.5, 0.5));
+    const gate = ease(k(t, 9.5, 0.8));
+    const mdl = ease(k(t, 13, 0.8));
+    return `
+      <div class="abs h1" style="left:140px; top:90px; opacity:${p1}">How Anvil runs on <span class="accent">TrueForge</span></div>
+      ${box(140, 300, 560, 420, 'VS Code · Anvil', 'Inline edit · Agent panel<br>Per-hunk diff review<br>Context engine (BM25 + counterparts)', p1, 'var(--blue)')}
+      ${box(980, 300, 520, 420, 'TrueForge (local)', 'Agent loop · sessions<br>Approvals · sub-agents<br>Deferred tools · compaction', p2, 'var(--accent)')}
+      ${box(1580, 300, 230, 420, 'Model', 'Gemini, Groq,<br>Ollama…', p3, 'var(--violet)')}
+      <svg class="abs" style="left:0; top:0" width="${W}" height="${H}">
+        <defs><marker id="ar" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#8a96ad"/></marker></defs>
+        <line x1="700" y1="420" x2="975" y2="420" stroke="#8a96ad" stroke-width="3" marker-end="url(#ar)" opacity="${p2}"/>
+        <text x="740" y="400" fill="#8a96ad" font-size="22" opacity="${p2}">sessions · turns (SSE)</text>
+        <line x1="975" y1="600" x2="705" y2="600" stroke="var(--accent)" stroke-width="3" marker-end="url(#ar)" opacity="${pt(0)}"/>
+        <text x="745" y="640" fill="#ff7a1a" font-size="22" opacity="${pt(0)}">MCP tool calls</text>
+        <line x1="1500" y1="510" x2="1575" y2="510" stroke="#8a96ad" stroke-width="3" marker-end="url(#ar)" opacity="${p3}"/>
+        <circle cx="${700 + flow * 275}" cy="420" r="7" fill="#58a6ff" opacity="${p2}"/>
+        <circle cx="${975 - flow * 270}" cy="600" r="7" fill="#ff7a1a" opacity="${pt(0)}"/>
+      </svg>
+      <div class="abs" style="left:140px; top:780px; width:1660px; display:flex; flex-wrap:wrap; gap:16px">
+        ${tools.map((n, i) => `<span class="chip mono" style="font-size:24px; padding:10px 18px; opacity:${pt(i)}; transform: translateY(${(1 - pt(i)) * 20}px)">${n}</span>`).join('')}
+      </div>
+      <div class="abs chip" style="left:980px; top:200px; opacity:${gate}; border-color: var(--ok)"><span class="dot" style="background:var(--ok)"></span>approval gate → per-hunk review</div>
+      <div class="abs chip" style="left:1380px; top:960px; opacity:${mdl}; font-size:26px"><span class="dot" style="background:var(--violet)"></span>extension never calls a model directly</div>`;
+  },
+
+  security(t) {
+    const classes = [
+      ['Config tampering → RCE', 'CVE-2025-53773'],
+      ['Exfiltration side-channels', 'CVE-2025-53097'],
+      ['Secrets reaching the model', '.env, keys, tokens'],
+      ['Hidden Unicode backdoors', 'GlassWorm · Trojan Source'],
+      ['Local server CSRF / DNS rebinding', 'CVE-2025-49596'],
+      ['Destructive agency', 'rm -rf · git reset --hard'],
+      ['Untrusted workspaces', 'Restricted Mode'],
+      ['Loops & runaway cost', 'OWASP LLM10'],
+      ['Path traversal & symlinks', 'ADS · devices · realpath'],
+      ['ReDoS from model regex', 'pattern guard'],
+      ['Terminal escape injection', 'OSC 52'],
+      ['Supply chain', 'npm audit: 0'],
+      ['Repudiation', 'JSONL audit log'],
+    ];
+    const head = ease(k(t, 0.1, 0.7));
+    return `
+      <div class="abs h1" style="left:140px; top:80px; opacity:${head}">Hardened against <span class="accent">13</span> real vulnerability classes</div>
+      <div class="abs sub" style="left:140px; top:180px; opacity:${head}">Each with a control in Anvil, and a test that proves it</div>
+      ${classes.map(([a, b], i) => {
+        const p = ease(k(t, 1.0 + i * 0.9, 0.5));
+        const col = i % 2, row = Math.floor(i / 2);
+        const check = ease(k(t, 1.4 + i * 0.9, 0.35));
+        return `<div class="abs card" style="left:${140 + col * 830}px; top:${270 + row * 108}px; width:800px; padding:20px 28px; opacity:${p}; transform: translateX(${(1 - p) * (col ? 40 : -40)}px); display:flex; align-items:center; gap:20px">
+          <div style="width:44px;height:44px;border-radius:50%;background:rgba(63,185,80,${0.15 * check});display:grid;place-items:center;font-size:26px;transform:scale(${outBack(check)})" class="ok">✓</div>
+          <div style="flex:1"><div style="font-size:30px;font-weight:600">${a}</div><div class="mono" style="font-size:20px;color:var(--muted)">${b}</div></div></div>`;
+      }).join('')}`;
+  },
+
+  outro(t) {
+    const a = outBack(k(t, 0.2, 0.8)), b = ease(k(t, 0.8, 0.7));
+    const lines = ['Context you can see', 'Changes you control', 'Keeps working when models fail'];
+    return `
+      <div class="abs" style="left:${W / 2 - 80}px; top:150px; transform: scale(${a})">${anvilMark(160)}</div>
+      <div class="abs title" style="width:100%; text-align:center; top:330px; font-size:110px; opacity:${b}">Anvil</div>
+      ${lines.map((l, i) => {
+        const p = ease(k(t, 1.6 + i * 0.9, 0.6));
+        return `<div class="abs h2" style="width:100%; text-align:center; top:${520 + i * 80}px; opacity:${p}; transform: translateY(${(1 - p) * 20}px)">${l}</div>`;
+      }).join('')}
+      <div class="abs" style="width:100%; text-align:center; top:840px; opacity:${ease(k(t, 4.6, 0.7))}">
+        <span class="chip"><span class="dot"></span>Built on <b class="accent">&nbsp;TrueForge</b> · TrueFoundry Forge-a-thon</span></div>`;
+  },
+
+  // Caption card that sits on top of footage (transparent background).
+  caption(t, text, speed) {
+    const p = ease(k(t, 0.15, 0.5)), q = 1 - ease(k(t, DUR - 0.5, 0.5));
+    stage.innerHTML = `<div class="abs" style="left:48px; top:40px; opacity:${Math.min(p, q)}; transform: translateX(${(1 - p) * -30}px)">
+        <span class="chip" style="background: rgba(18,24,38,0.92); font-size:30px"><span class="dot"></span>${text}</span></div>
+      ${speed ? `<div class="abs" style="right:48px; top:44px; opacity:${Math.min(p, q)}"><span class="chip" style="background: rgba(18,24,38,0.92); font-size:24px; color:var(--muted)">⏩ model time sped up ${speed}</span></div>` : ''}`;
+  },
+};
+
+window.render = (name, t, dur, ...rest) => {
+  DUR = dur;
+  if (name === 'caption') return scenes.caption(t, ...rest);
+  frame(scenes[name](t), t);
+};
+</script>
+</body>
+</html>

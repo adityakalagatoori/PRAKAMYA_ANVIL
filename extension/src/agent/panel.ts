@@ -55,6 +55,11 @@ export class AgentPanel implements vscode.WebviewViewProvider {
     this.post({ type: 'ui', event: e });
   }
 
+  /** Demo/recording mode: types a request into the panel input visibly, then sends it. */
+  demoType(text: string) {
+    this.post({ type: 'demoType', text });
+  }
+
   async reveal() {
     await vscode.commands.executeCommand(`${AgentPanel.viewId}.focus`);
   }

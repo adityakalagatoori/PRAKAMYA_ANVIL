@@ -105,18 +105,32 @@ export class AgentRunner {
           sink.emit({ t: 'fallback', from: models[slot - 1], to: models[slot], reason: lastError });
           this.log.appendLine(`[run ${runId}] falling back to ${models[slot]}: ${lastError}`);
         }
+        let rateWaits = 0;
+        // Coder retries on the same model continue the same TrueForge session, so the tool results
+        // gathered so far are kept (a fresh session would throw that progress away).
+        let resumable: string | undefined;
+        let failures = 0;
         for (let attempt = 0; attempt <= retries; attempt++) {
           if (run.cancelled) return this.finish(sink, runId, { status: 'cancelled', output: '', slot });
-          if (attempt > 0) {
-            const wait = BACKOFF_MS[Math.min(attempt - 1, BACKOFF_MS.length - 1)];
-            sink.emit({ t: 'notice', level: 'warn', text: `Model error on ${models[slot]}: ${short(lastError)} — retry ${attempt}/${retries} in ${wait / 1000}s` });
+          if (failures > 0) {
+            const rl = rateLimitDelayMs(lastError);
+            const wait = rl ?? BACKOFF_MS[Math.min(Math.max(0, attempt - 1), BACKOFF_MS.length - 1)];
+            sink.emit({
+              t: 'notice',
+              level: 'warn',
+              text: rl
+                ? `Rate limited by ${models[slot]} — waiting ${Math.round(wait / 1000)}s, then continuing where it left off`
+                : `Model error on ${models[slot]}: ${short(lastError)} — retry ${attempt}/${retries} in ${wait / 1000}s`,
+            });
             if (!(await sleep(wait, run.abort.signal))) return this.finish(sink, runId, { status: 'cancelled', output: '', slot });
           }
-          // Fresh session per attempt; continue the panel conversation only on its first attempt.
           let sessionId: string;
           let turnInput = input;
           if (opts.continueConversation && this.conversation && slot === this.conversation.slot && attempt === 0) {
             sessionId = this.conversation.sessionId;
+          } else if (resumable) {
+            sessionId = resumable;
+            turnInput = RESUME_MESSAGE;
           } else {
             sessionId = await this.gw.createSession(kind, slot, opts.title);
             const applied = this.undo.forRun(runId);
@@ -133,8 +147,15 @@ export class AgentRunner {
           }
           if (res.status === 'cancelled' || run.cancelled) return this.finish(sink, runId, { status: 'cancelled', output: res.output, sessionId, slot });
           lastError = res.message ?? 'unknown error';
+          failures++;
           this.log.appendLine(`[run ${runId}] ${models[slot]} attempt ${attempt + 1} failed: ${lastError}`);
           if (!isTransient(lastError)) break; // auth / config errors: go straight to the next model
+          if (kind === 'coder') resumable = sessionId;
+          // Waiting out a provider rate limit is not a failure of the model: don't burn a retry on it.
+          if (rateLimitDelayMs(lastError) !== undefined && rateWaits < 8) {
+            rateWaits++;
+            attempt--;
+          }
         }
       }
       return this.finish(sink, runId, {
@@ -422,4 +443,20 @@ function sleep(ms: number, signal: AbortSignal): Promise<boolean> {
       resolve(false);
     }, { once: true });
   });
+}
+
+const RESUME_MESSAGE =
+  'The previous step was interrupted by a temporary model/provider error. Continue the task from where you left off; ' +
+  'do not repeat tool calls whose results you already have.';
+
+/** Delay to honour for provider rate limits (uses the provider's own "retry in Xs" hint when present). */
+export function rateLimitDelayMs(message: string): number | undefined {
+  if (!/\b429\b|rate.?limit|quota|too many requests|resource.?exhausted/i.test(message)) return undefined;
+  const m = /retry (?:in|after) ([\d.]+)\s*(ms|s|sec|seconds)?/i.exec(message);
+  if (m) {
+    const v = parseFloat(m[1]);
+    const ms = m[2] === 'ms' ? v : v * 1000;
+    return Math.min(65_000, Math.max(2_000, Math.ceil(ms + 1_000)));
+  }
+  return 20_000;
 }

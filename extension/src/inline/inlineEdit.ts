@@ -10,7 +10,7 @@ import { sanitizeForModel } from '../security/policy';
  * Inline edit: select code → Ctrl+Alt+K → instruction → streamed diff in the editor → per-hunk review.
  * The model runs on TrueForge (agent anvil-inline); the extension only renders and applies.
  */
-export async function inlineEdit(runner: AgentRunner, reviews: ReviewManager, index: WorkspaceIndex, log: vscode.OutputChannel, onEvent?: (e: UiEvent) => void, preset?: { instruction?: string }) {
+export async function inlineEdit(runner: AgentRunner, reviews: ReviewManager, index: WorkspaceIndex, log: vscode.OutputChannel, onEvent?: (e: UiEvent) => void, preset?: { instruction?: string; animate?: boolean }) {
   const editor = vscode.window.activeTextEditor;
   if (!editor || editor.document.uri.scheme !== 'file') {
     vscode.window.showInformationMessage('Anvil: open a file and select the code to edit.');
@@ -38,12 +38,17 @@ export async function inlineEdit(runner: AgentRunner, reviews: ReviewManager, in
   const range = new vscode.Range(startLine, 0, endLine, doc.lineAt(endLine).text.length);
   editor.selection = new vscode.Selection(range.start, range.end);
 
-  const instruction = preset?.instruction ?? await vscode.window.showInputBox({
-    title: `Anvil inline edit — ${rel}:${startLine + 1}-${endLine + 1}`,
-    prompt: 'Describe the change (use @file or @symbol to pull in more context)',
-    placeHolder: 'e.g. Treat "off" and "n" as false as well, and update the docstring',
-    ignoreFocusOut: true,
-  });
+  const title = `Anvil inline edit — ${rel}:${startLine + 1}-${endLine + 1}`;
+  const instruction =
+    preset?.instruction && preset.animate
+      ? await typeIntoInputBox(title, preset.instruction)
+      : preset?.instruction ??
+        (await vscode.window.showInputBox({
+          title,
+          prompt: 'Describe the change (use @file or @symbol to pull in more context)',
+          placeHolder: 'e.g. Treat "off" and "n" as false as well, and update the docstring',
+          ignoreFocusOut: true,
+        }));
   if (!instruction?.trim()) return;
 
   const original = doc.getText();
@@ -168,4 +173,21 @@ export function normaliseIndent(code: string, selected: string): string {
     return code.split('\n').map((l) => (l.trim() ? add + l : l)).join('\n');
   }
   return code;
+}
+
+/** Demo/recording mode: shows the real input box and types the instruction into it visibly. */
+async function typeIntoInputBox(title: string, text: string): Promise<string> {
+  const box = vscode.window.createInputBox();
+  box.title = title;
+  box.prompt = 'Describe the change (use @file or @symbol to pull in more context)';
+  box.ignoreFocusOut = true;
+  box.show();
+  for (let i = 1; i <= text.length; i++) {
+    box.value = text.slice(0, i);
+    await new Promise((r) => setTimeout(r, 28));
+  }
+  await new Promise((r) => setTimeout(r, 700));
+  box.hide();
+  box.dispose();
+  return text;
 }

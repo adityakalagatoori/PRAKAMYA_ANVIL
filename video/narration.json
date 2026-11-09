@@ -1,0 +1,55 @@
+{
+  "voice": "en-US-AndrewNeural",
+  "rate": "+4%",
+  "scenes": [
+    {
+      "id": "intro",
+      "kind": "graphic",
+      "text": "This is Anvil: a coding agent that lives inside VS Code, with its agent loop running on TrueForge."
+    },
+    {
+      "id": "problem",
+      "kind": "graphic",
+      "text": "AI coding tools are powerful, but developers keep hitting the same walls. The agent loses track of the code that matters. It rewrites files you never asked it to touch. And, as real CVEs in Copilot, Cursor and Cline have shown, it can be tricked into running code or leaking your secrets."
+    },
+    {
+      "id": "architecture",
+      "kind": "graphic",
+      "text": "Anvil is a client of a TrueForge agent. The editor's capabilities, like retrieval, search, reading, reviewed writes and approved commands, are exposed as MCP tools. So the agent decides what to read and change, and TrueForge's approval gate drives every diff review. Your model lives in TrueForge, never in the extension."
+    },
+    {
+      "id": "taskA",
+      "kind": "footage",
+      "caption": "Task A · Inline edit",
+      "text": "Task A. Select a function, press Control Alt K, and describe the change. The diff streams straight into the editor, and you accept or reject each hunk. With FLASK DEBUG set to off, the check now prints False. And any applied change is one undo away."
+    },
+    {
+      "id": "agent",
+      "kind": "footage",
+      "caption": "Task B · Agent mode",
+      "text": "Task B. One request, and no files named. Before the first token, Anvil's retriever assembles a budgeted context pack, and shows exactly which files it chose, and why. The agent explores with TrueForge's deferred tool loading, reads only what it needs, and proposes changes that you review hunk by hunk."
+    },
+    {
+      "id": "taskC",
+      "kind": "footage",
+      "caption": "Task C · Resilience",
+      "text": "Task C. Here the primary model's endpoint is unreachable. Anvil retries with backoff, then fails over to the next configured model automatically, and the edit still lands. With no fallback at all, you get a clear error, the editor stays responsive, and git status stays clean."
+    },
+    {
+      "id": "security",
+      "kind": "graphic",
+      "text": "Anvil is hardened against thirteen classes of vulnerabilities seen in real AI coding tools. Edits to config files, like VS Code settings, are flagged and need explicit confirmation. Secrets never reach the model. Hidden Unicode is revealed. Risky commands are rated. And every action is audited, with each control backed by a test."
+    },
+    {
+      "id": "securityClip",
+      "kind": "footage",
+      "caption": "Security · live",
+      "text": "Here, a prompt-injected edit tries to switch on auto approval in VS Code settings. Anvil flags it before anything touches disk. Then the attack simulation tests run, live."
+    },
+    {
+      "id": "outro",
+      "kind": "graphic",
+      "text": "Anvil. Context you can see, changes you control, and an agent that keeps working when models fail. Built on TrueForge."
+    }
+  ]
+}

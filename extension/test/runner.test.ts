@@ -207,3 +207,26 @@ test('auto-continue when a change request ends without any write attempt', async
   await new AgentRunner(r2.gw, { cancelAll() {} } as any, { forRun: () => [] } as any, new RunState(), log).run('coder', 'How does routing work?', sinkOf([]));
   assert.equal(r2.calls.inputs.length, 1);
 });
+
+test('rate limit: honours provider retry hint, resumes the SAME session, does not burn retries or fall back', async () => {
+  const { rateLimitDelayMs } = await import('../src/trueforge/runner');
+  assert.equal(rateLimitDelayMs('Request failed (429): quota exceeded. Please retry in 0.2s.'), 2000);
+  assert.equal(rateLimitDelayMs('429 Too Many Requests. Please retry in 27.69s.'), 28690);
+  assert.equal(rateLimitDelayMs('401 invalid api key'), undefined);
+  let calls = 0;
+  const { gw, calls: c } = fakeGateway(['m/1', 'm/2'], async (slot, input, emit) => {
+    calls++;
+    if (calls <= 3) return { status: 'error', message: '[Model Error] Request failed (429): quota. Please retry in 0.01s.', completedAt: '' };
+    emit({ type: 'model.message.delta', id: 'ok', threadId: 'main', content: `done on ${slot} after ${input[0].content.slice(0, 20)}`, finishReason: 'stop' });
+    return done();
+  });
+  const events: UiEvent[] = [];
+  const runner = new AgentRunner(gw, { cancelAll() {} } as any, { forRun: () => [] } as any, new RunState(), log);
+  const r = await runner.run('coder', 'How does routing work?', sinkOf(events));
+  assert.equal(r.status, 'done');
+  assert.equal(r.slot, 0, 'stayed on the primary model (retries=2 but 3 rate-limit waits)');
+  assert.equal(r.sessionId, 's1', 'resumed the same TrueForge session');
+  assert.match(c.inputs[1][0].content, /Continue the task/);
+  assert.ok(events.some((e) => e.t === 'notice' && /Rate limited/.test(e.text)));
+  assert.ok(!events.some((e) => e.t === 'fallback'));
+});

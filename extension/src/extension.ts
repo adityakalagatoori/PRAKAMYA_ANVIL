@@ -96,7 +96,7 @@ export async function activate(ctx: vscode.ExtensionContext) {
   ctx.subscriptions.push(status, { dispose: () => clearInterval(ticker) });
 
   ctx.subscriptions.push(
-    vscode.commands.registerCommand('anvil.inlineEdit', (preset?: { instruction?: string }) => inlineEdit(runner, reviews, index, log, (e) => panel.mirror(e), preset)),
+    vscode.commands.registerCommand('anvil.inlineEdit', (preset?: { instruction?: string; animate?: boolean }) => inlineEdit(runner, reviews, index, log, (e) => panel.mirror(e), preset)),
     vscode.commands.registerCommand('anvil.openPanel', () => panel.reveal()),
     vscode.commands.registerCommand('anvil.cancel', async () => {
       if (!runner.isRunning) return;
@@ -161,7 +161,7 @@ export async function activate(ctx: vscode.ExtensionContext) {
     .catch((e) => log.appendLine(`[setup] deferred: ${(e as Error).message}`));
   log.appendLine(`Anvil ready. MCP: ${mcpInfo().url} · TrueForge: ${getConfig().trueforgeUrl} · models: ${getConfig().models.join(' → ') || '(none)'}`);
   // Exposed for integration tests.
-  return { reviews, undo, index, runner, gateway, mcpInfo };
+  return { reviews, undo, index, runner, gateway, mcpInfo, panel };
 }
 
 export function deactivate() {}
