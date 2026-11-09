@@ -230,3 +230,21 @@ test('rate limit: honours provider retry hint, resumes the SAME session, does no
   assert.ok(events.some((e) => e.t === 'notice' && /Rate limited/.test(e.text)));
   assert.ok(!events.some((e) => e.t === 'fallback'));
 });
+
+test('daily quota exhausted → immediate fallback (no futile waiting)', async () => {
+  const { isDailyQuota, rateLimitDelayMs } = await import('../src/trueforge/runner');
+  const daily = 'Request failed (429): You exceeded your current quota. Quota exceeded for metric: generate_content_free_tier_requests, limit: 20, description: Generate content requests per day limit exceeded on Free Tier. Please retry in 30s.';
+  assert.ok(isDailyQuota(daily));
+  assert.equal(rateLimitDelayMs(daily), undefined);
+  let primary = 0;
+  const { gw } = fakeGateway(['a/1', 'b/2'], async (slot, _i, emit) => {
+    if (slot === 0) return primary++, { status: 'error', message: daily, completedAt: '' };
+    emit({ type: 'model.message.delta', id: 'x', threadId: 'main', content: 'ok', finishReason: 'stop' });
+    return done();
+  });
+  const t0 = Date.now();
+  const r = await new AgentRunner(gw, { cancelAll() {} } as any, { forRun: () => [] } as any, new RunState(), log).run('coder', 'question?', sinkOf([]));
+  assert.equal(r.slot, 1);
+  assert.equal(primary, 1);
+  assert.ok(Date.now() - t0 < 1500);
+});

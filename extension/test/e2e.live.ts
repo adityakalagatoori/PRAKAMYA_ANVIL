@@ -68,7 +68,7 @@ async function main() {
       const { execSync } = await import('node:child_process');
       console.log(`  [cmd] ${cmd}`);
       try {
-        return 'exit code: 0\n' + execSync(cmd, { cwd: WS, encoding: 'utf8', timeout: 180000, stdio: 'pipe' }).slice(-4000);
+        return 'exit code: 0\n' + execSync(cmd, { cwd: WS, encoding: 'utf8', timeout: 180000, stdio: 'pipe', env: cmdEnv() }).slice(-4000);
       } catch (e: any) {
         return `exit code: ${e.status}\n${String(e.stdout ?? '').slice(-3000)}${String(e.stderr ?? '').slice(-2000)}`;
       }
@@ -97,9 +97,11 @@ async function main() {
         console.log(`  <${e.t}> ${brief}`);
       }
     },
-    approveCommand: async (_id: string, cmd: string) => {
-      console.log(`  [approve] ${cmd}`);
-      return true;
+    // Behaves like a careful user: approves low-risk commands (tests, --help), denies installs and anything riskier.
+    approveCommand: async (_id: string, cmd: string, risk?: { risk: string; reasons: string[] }) => {
+      const ok = (risk?.risk ?? 'low') === 'low';
+      console.log(`  [${ok ? 'approve' : 'deny'}] ${cmd}${ok ? '' : ` (${risk?.reasons.join(', ')})`}`);
+      return ok;
     },
   };
 

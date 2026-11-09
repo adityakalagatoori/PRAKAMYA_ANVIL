@@ -94,9 +94,8 @@ const scenes = {
       }).join('')}
       ${cves.map((c, i) => {
         const p = ease(k(t, 5.6 + i * 0.45, 0.6));
-        const col = i % 2, row = Math.floor(i / 2);
-        return `<div class="abs" style="left:${1200 + col * 330}px; top:${310 + row * 105}px; opacity:${p}; transform: scale(${0.8 + 0.2 * p})">
-          <span class="tag mono" style="font-size:21px">${c}</span></div>`;
+        return `<div class="abs" style="left:1240px; top:${300 + i * 64}px; opacity:${p}; transform: translateX(${(1 - p) * 40}px)">
+          <span class="tag mono" style="font-size:24px; padding:6px 16px">${c}</span></div>`;
       }).join('')}`;
   },
 

@@ -113,7 +113,9 @@ export class AgentRunner {
         for (let attempt = 0; attempt <= retries; attempt++) {
           if (run.cancelled) return this.finish(sink, runId, { status: 'cancelled', output: '', slot });
           if (failures > 0) {
-            const rl = rateLimitDelayMs(lastError);
+            // Escalate consecutive rate-limit waits: the provider's hint, then at least 15s, 30s, 60s.
+            const hint = rateLimitDelayMs(lastError);
+            const rl = hint === undefined ? undefined : Math.max(hint, [0, 15_000, 30_000, 60_000][Math.min(rateWaits, 3)]);
             const wait = rl ?? BACKOFF_MS[Math.min(Math.max(0, attempt - 1), BACKOFF_MS.length - 1)];
             sink.emit({
               t: 'notice',
@@ -149,10 +151,10 @@ export class AgentRunner {
           lastError = res.message ?? 'unknown error';
           failures++;
           this.log.appendLine(`[run ${runId}] ${models[slot]} attempt ${attempt + 1} failed: ${lastError}`);
-          if (!isTransient(lastError)) break; // auth / config errors: go straight to the next model
+          if (!isTransient(lastError) || isDailyQuota(lastError)) break; // auth/config errors and daily caps: next model now
           if (kind === 'coder') resumable = sessionId;
           // Waiting out a provider rate limit is not a failure of the model: don't burn a retry on it.
-          if (rateLimitDelayMs(lastError) !== undefined && rateWaits < 8) {
+          if (rateLimitDelayMs(lastError) !== undefined && rateWaits < 40) {
             rateWaits++;
             attempt--;
           }
@@ -445,6 +447,10 @@ function sleep(ms: number, signal: AbortSignal): Promise<boolean> {
   });
 }
 
+export function isDailyQuota(message: string): boolean {
+  return /per ?day|PerDay|daily (limit|quota)|requests per day/i.test(message);
+}
+
 const RESUME_MESSAGE =
   'The previous step was interrupted by a temporary model/provider error. Continue the task from where you left off; ' +
   'do not repeat tool calls whose results you already have.';
@@ -452,7 +458,9 @@ const RESUME_MESSAGE =
 /** Delay to honour for provider rate limits (uses the provider's own "retry in Xs" hint when present). */
 export function rateLimitDelayMs(message: string): number | undefined {
   if (!/\b429\b|rate.?limit|quota|too many requests|resource.?exhausted/i.test(message)) return undefined;
-  const m = /retry (?:in|after) ([\d.]+)\s*(ms|s|sec|seconds)?/i.exec(message);
+  // A daily cap will not clear in seconds: treat it as "this model is unavailable" so we fall back now.
+  if (isDailyQuota(message)) return undefined;
+  const m =/retry (?:in|after) ([\d.]+)\s*(ms|s|sec|seconds)?/i.exec(message);
   if (m) {
     const v = parseFloat(m[1]);
     const ms = m[2] === 'ms' ? v : v * 1000;
