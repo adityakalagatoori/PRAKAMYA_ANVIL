@@ -43,18 +43,22 @@ writeFileSync(
       'git.openRepositoryInParentFolders': 'never',
       'security.workspace.trust.enabled': false,
       'anvil.models': [process.env.ANVIL_LIVE_MODEL ?? 'ollama/qwen25-7b'],
+      'anvil.modelParams': JSON.parse(process.env.ANVIL_MODEL_PARAMS ?? '{}'),
     },
     null,
     2,
   ),
 );
 process.env.ANVIL_EXT_DIR = ext;
+// The agent's commands must use Flask's pinned test env (pytest 8.4.2) and import the workspace copy.
+if (process.env.ANVIL_VENV_BIN) process.env.PATH = `${process.env.ANVIL_VENV_BIN};${process.env.PATH}`;
+process.env.PYTHONPATH = join(ws, 'src');
 
 try {
   await runTests({
     extensionDevelopmentPath: ext,
     extensionTestsPath: join(ext, 'out-test', 'demo.cjs'),
-    launchArgs: [ws, '--disable-extensions', '--user-data-dir', ud, '--skip-welcome', '--skip-release-notes'],
+    launchArgs: [ws, '--disable-extensions', `--remote-debugging-port=${process.env.ANVIL_CDP_PORT ?? 9333}`, '--disable-backgrounding-occluded-windows', '--disable-renderer-backgrounding', '--user-data-dir', ud, '--skip-welcome', '--skip-release-notes'],
   });
   console.log('demo: OK');
 } catch (e) {

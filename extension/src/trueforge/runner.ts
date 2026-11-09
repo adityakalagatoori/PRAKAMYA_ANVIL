@@ -114,8 +114,7 @@ export class AgentRunner {
           if (run.cancelled) return this.finish(sink, runId, { status: 'cancelled', output: '', slot });
           if (failures > 0) {
             // Escalate consecutive rate-limit waits: the provider's hint, then at least 15s, 30s, 60s.
-            const hint = rateLimitDelayMs(lastError);
-            const rl = hint === undefined ? undefined : Math.max(hint, [0, 15_000, 30_000, 60_000][Math.min(rateWaits, 3)]);
+            const rl = rateLimitWaitMs(lastError, rateWaits);
             const wait = rl ?? BACKOFF_MS[Math.min(Math.max(0, attempt - 1), BACKOFF_MS.length - 1)];
             sink.emit({
               t: 'notice',
@@ -454,6 +453,16 @@ export function isDailyQuota(message: string): boolean {
 const RESUME_MESSAGE =
   'The previous step was interrupted by a temporary model/provider error. Continue the task from where you left off; ' +
   'do not repeat tool calls whose results you already have.';
+
+/**
+ * Wait before retrying after a rate limit: the provider's hint, escalated to at least 15s / 30s / 60s on the
+ * 2nd / 3rd / 4th+ consecutive rate limit (`priorWaits` = rate-limit waits already taken on this model).
+ * Undefined when the error is not a (retryable) rate limit.
+ */
+export function rateLimitWaitMs(message: string, priorWaits: number): number | undefined {
+  const hint = rateLimitDelayMs(message);
+  return hint === undefined ? undefined : Math.max(hint, [0, 15_000, 30_000, 60_000][Math.min(Math.max(0, priorWaits), 3)]);
+}
 
 /** Delay to honour for provider rate limits (uses the provider's own "retry in Xs" hint when present). */
 export function rateLimitDelayMs(message: string): number | undefined {

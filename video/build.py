@@ -151,8 +151,15 @@ def main():
         seconds = duration(ffprobe, audio) + 1.1
         vid = BUILD / f"{s['id']}.video.mp4"
         if s["kind"] == "graphic":
-            print(f"2/4 motion graphics: {s['id']} ({seconds:.1f}s)")
-            render_graphic(ffmpeg, s["id"], seconds, vid)
+            import hashlib
+            key = hashlib.sha256((s["text"] + f"{seconds:.3f}" + (ROOT / "scenes.html").read_text(encoding="utf-8") + (ROOT / "scenes2.js").read_text(encoding="utf-8")).encode()).hexdigest()
+            keyf = BUILD / f"{s['id']}.video.key"
+            if vid.exists() and keyf.exists() and keyf.read_text() == key:
+                print(f"2/4 motion graphics: {s['id']} (cached)")
+            else:
+                print(f"2/4 motion graphics: {s['id']} ({seconds:.1f}s)")
+                render_graphic(ffmpeg, s["id"], seconds, vid)
+                keyf.write_text(key)
         else:
             sp = fit_footage(ffmpeg, ffprobe, clips / f"{s['id']}.mp4", seconds, s["caption"], vid)
             print(f"3/4 footage: {s['id']} ({seconds:.1f}s, speed x{sp:.2f})")

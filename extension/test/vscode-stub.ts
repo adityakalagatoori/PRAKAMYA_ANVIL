@@ -40,3 +40,7 @@ export class EventEmitter<T> {
 }
 export const window = {};
 export const commands = { executeCommand: async () => undefined };
+export const env = { openExternal: async () => true };
+export class Range {
+  constructor(public startLine: number, public startCharacter: number, public endLine: number, public endCharacter: number) {}
+}

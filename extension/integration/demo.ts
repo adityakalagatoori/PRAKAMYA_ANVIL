@@ -1,10 +1,10 @@
 /**
  * Scripted product demo. Runs INSIDE a real VS Code (integration/demo-run.mjs) with the real extension,
- * real TrueForge and a real model, and records each scene with ffmpeg (gdigrab, window title "Anvil Demo").
+ * real TrueForge and a real model, and records each scene from the VS Code renderer via the DevTools screencast (only VS Code pixels).
  * Nothing is mocked: every diff, notice and test result on screen is produced live.
  */
 import * as vscode from 'vscode';
-import { spawn, ChildProcess } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import { writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -18,16 +18,46 @@ const SCENES = (process.env.ANVIL_DEMO_SCENES ?? 'taskA,taskC,agent,security').s
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const timeline: Record<string, { t: number; what: string }[]> = {};
 
+const CDP_PORT = Number(process.env.ANVIL_CDP_PORT ?? 9333);
+const toPosix = (p: string) => p.split('\\').join('/');
+
+/**
+ * Records ONLY VS Code's own rendered pixels via the Chromium DevTools screencast of the workbench page.
+ * Independent of what else is on screen (no desktop capture, nothing outside VS Code is ever recorded).
+ */
 class Recorder {
-  private p: ChildProcess | undefined;
+  private ws: WebSocket | undefined;
+  private frames: { file: string; ts: number }[] = [];
+  private dir = '';
   private t0 = 0;
+  private msgId = 0;
   constructor(private name: string) {}
+  private send(method: string, params: Record<string, unknown> = {}) {
+    this.ws?.send(JSON.stringify({ id: ++this.msgId, method, params }));
+  }
   async start() {
-    mkdirSync(OUT, { recursive: true });
     timeline[this.name] = [];
-    this.p = spawn(FFMPEG, ['-y', '-hide_banner', '-loglevel', 'error', '-f', 'gdigrab', '-framerate', '30', '-draw_mouse', '0', '-i', 'title=Anvil Demo',
-      '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2', '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '16', '-pix_fmt', 'yuv420p', join(OUT, `${this.name}.mp4`)], { stdio: ['pipe', 'ignore', 'pipe'] });
-    this.p.stderr?.on('data', (d) => console.log(`[ffmpeg ${this.name}] ${d}`));
+    await vscode.commands.executeCommand('notifications.clearAll');
+    this.dir = join(OUT, `${this.name}_frames`);
+    mkdirSync(this.dir, { recursive: true });
+    const list = (await (await fetch(`http://127.0.0.1:${CDP_PORT}/json/list`)).json()) as any[];
+    const page = list.find((p) => p.type === 'page' && /workbench/.test(p.url));
+    if (!page) throw new Error('workbench page not found on the DevTools port');
+    this.ws = new WebSocket(page.webSocketDebuggerUrl);
+    await new Promise((r, j) => {
+      this.ws!.onopen = r;
+      this.ws!.onerror = j;
+    });
+    this.ws.onmessage = (ev: MessageEvent) => {
+      const m = JSON.parse(String(ev.data));
+      if (m.method === 'Page.screencastFrame') {
+        const file = join(this.dir, `${String(this.frames.length).padStart(6, '0')}.jpg`);
+        writeFileSync(file, Buffer.from(m.params.data, 'base64'));
+        this.frames.push({ file, ts: m.params.metadata.timestamp });
+        this.send('Page.screencastFrameAck', { sessionId: m.params.sessionId });
+      }
+    };
+    this.send('Page.startScreencast', { format: 'jpeg', quality: 92, everyNthFrame: 1, maxWidth: 1920, maxHeight: 1200 });
     this.t0 = Date.now();
     await sleep(800);
   }
@@ -36,11 +66,24 @@ class Recorder {
     console.log(`  [${this.name} ${((Date.now() - this.t0) / 1000).toFixed(1)}s] ${what}`);
   }
   async stop() {
-    await sleep(600);
-    if (!this.p) return;
-    const done = new Promise((r) => this.p!.on('close', r));
-    this.p.stdin?.write('q');
-    await done;
+    await sleep(800);
+    this.send('Page.stopScreencast');
+    const end = Date.now() / 1000;
+    await sleep(300);
+    this.ws?.close();
+    if (!this.frames.length) throw new Error(`no frames recorded for ${this.name}`);
+    // Variable-rate frames -> concat list with real durations -> constant 30 fps video.
+    const lines: string[] = [];
+    this.frames.forEach((f, i) => {
+      const next = i + 1 < this.frames.length ? this.frames[i + 1].ts : end;
+      lines.push(`file '${toPosix(f.file)}'`, `duration ${Math.max(0.001, next - f.ts).toFixed(4)}`);
+    });
+    lines.push(`file '${toPosix(this.frames[this.frames.length - 1].file)}'`);
+    const listFile = join(this.dir, 'list.txt');
+    writeFileSync(listFile, lines.join('\n'));
+    execFileSync(FFMPEG, ['-y', '-hide_banner', '-loglevel', 'error', '-f', 'concat', '-safe', '0', '-i', listFile,
+      '-vf', 'fps=30,scale=trunc(iw/2)*2:trunc(ih/2)*2', '-c:v', 'libx264', '-preset', 'medium', '-crf', '17', '-pix_fmt', 'yuv420p', join(OUT, `${this.name}.mp4`)]);
+    console.log(`  [rec] ${this.name}: ${this.frames.length} frames -> ${this.name}.mp4`);
   }
 }
 
@@ -143,7 +186,7 @@ export async function run(): Promise<void> {
     await sleep(1500);
     // Undo, shown on screen
     await vscode.window.showTextDocument(helpers);
-    await vscode.commands.executeCommand('anvil.undoLast');
+    await vscode.commands.executeCommand('anvil.revertRun', 'inline');
     rec.mark('undo');
     await sleep(2500);
     await rec.stop();
@@ -167,7 +210,7 @@ export async function run(): Promise<void> {
     await sleep(1500);
     const term = await verifyTerminal(rec);
     await vscode.window.showTextDocument(helpers);
-    await vscode.commands.executeCommand('anvil.undoLast');
+    await vscode.commands.executeCommand('anvil.revertRun', 'inline');
     await sleep(1000);
     // Only the broken model: clear error, nothing changed.
     await cfg.update('models', ['broken/dead-model'], vscode.ConfigurationTarget.Global);
@@ -190,24 +233,79 @@ export async function run(): Promise<void> {
     await vscode.commands.executeCommand('anvil.openPanel');
     await sleep(1200);
     const rec = new Recorder('agent');
+    const models = [LIVE, process.env.ANVIL_LIVE_FALLBACK].filter(Boolean) as string[];
+    await cfg.update('models', models, vscode.ConfigurationTarget.Global);
+    api.panel.demoAutoApprove = true;
     await rec.start();
-    api.panel.demoType(
-      'Add a new built-in CLI command flask config that prints the loaded application\'s configuration as JSON, masking the values of any key containing SECRET, PASSWORD, TOKEN or KEY as "***". It must appear in flask --help, be covered by a test, and be documented alongside the other built-in commands.',
-    );
+    const TASK_B =
+      `Add a new built-in CLI command flask config that prints the loaded application's configuration as JSON, masking the values of any key containing SECRET, PASSWORD, TOKEN or KEY as "***". It must appear in flask --help, be covered by a test, and be documented alongside the other built-in commands.`;
+    await vscode.commands.executeCommand('anvil.agentPanel.focus');
+    await (api.panel as any).onMessage({ type: 'new' }); // fresh conversation, empty panel
+    await sleep(1200);
+    api.panel.demoType(TASK_B);
     rec.mark('request typed');
-    await waitFor(() => api.runner.isRunning, 60_000);
+    try {
+      await waitFor(() => api.runner.isRunning, 45_000);
+    } catch {
+      console.log('  [agent] webview send did not start a run; sending directly');
+      void api.panel.send(TASK_B);
+      await waitFor(() => api.runner.isRunning, 30_000);
+    }
     rec.mark('run started');
-    // Let the agent work: retrieval, sub-agent, tool cards.
+    // Let the agent work; accept each proposed diff hunk by hunk, the way a reviewer would.
     const t0 = Date.now();
-    await waitFor(() => !api.runner.isRunning || Date.now() - t0 > Number(process.env.ANVIL_AGENT_SECONDS ?? 150) * 1000, 900_000);
+    while (api.runner.isRunning && Date.now() - t0 < Number(process.env.ANVIL_AGENT_SECONDS ?? 1500) * 1000) {
+      if (api.reviews.activeCount > 0) {
+        const ed = vscode.window.visibleTextEditors.find((e) => e.document.uri.scheme === 'anvil-proposed');
+        if (ed) {
+          const lenses: vscode.CodeLens[] = await vscode.commands.executeCommand('vscode.executeCodeLensProvider', ed.document.uri);
+          if (lenses.some((l) => l.command?.title.includes('Accept all'))) {
+            const rel = ed.document.uri.path.slice(1);
+            rec.mark(`review ${rel}`);
+            await sleep(2200);
+            // A careful reviewer: keep changes to the CLI, its tests and docs; reject edits to unrelated
+            // infrastructure (test fixtures, JSON provider) that the request never asked for.
+            const unrelated = /conftest\.py$|json\/provider\.py$/.test(rel);
+            if (unrelated) {
+              rec.mark(`reject unrelated ${rel}`);
+              await vscode.commands.executeCommand('anvil.rejectAll');
+              await sleep(1200);
+            }
+            while (api.reviews.activeCount > 0) {
+              await vscode.commands.executeCommand('anvil.acceptHunkAtCursor');
+              await sleep(900);
+            }
+            await vscode.commands.executeCommand('anvil.agentPanel.focus');
+          }
+        }
+      }
+      await sleep(400);
+    }
     if (api.runner.isRunning) {
       rec.mark('stop pressed');
       await vscode.commands.executeCommand('anvil.cancel');
       await sleep(3500);
     }
     rec.mark('ended');
+    await sleep(3000);
+    // Verification on screen: tests + the new command with masked secrets.
+    const term = vscode.window.createTerminal({
+      name: 'verify', cwd: root, shellPath: 'powershell.exe', shellArgs: ['-NoLogo', '-NoProfile'],
+      env: { PATH: `${VENV_BIN};${process.env.PATH}`, PYTHONPATH: join(root.fsPath, 'src') },
+    });
+    term.show(false);
+    await vscode.commands.executeCommand('workbench.action.toggleMaximizedPanel');
     await sleep(2000);
+    term.sendText('git diff --stat; python -m pytest tests/test_cli.py -q');
+    rec.mark('pytest');
+    await sleep(9000);
+    term.sendText(`flask --app "${process.env.ANVIL_DEMO_APP}" --help | Select-String "config"; flask --app "${process.env.ANVIL_DEMO_APP}" config | Select-String "SECRET|PASSWORD|TOKEN|GREETING"`);
+    rec.mark('flask config');
+    await sleep(9000);
+    await vscode.commands.executeCommand('workbench.action.toggleMaximizedPanel');
     await rec.stop();
+    term.dispose();
+    api.panel.demoAutoApprove = false;
   }
 
   // ---------------------------------------------------------------- Security

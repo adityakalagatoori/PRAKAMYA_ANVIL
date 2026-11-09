@@ -281,10 +281,11 @@
       input.focus();
       let i = 0;
       const step = () => {
-        input.value = m.text.slice(0, ++i);
+        i = Math.min(m.text.length, i + 3);
+        input.value = m.text.slice(0, i);
         input.scrollTop = input.scrollHeight;
-        if (i < m.text.length) setTimeout(step, 18);
-        else setTimeout(send, 600);
+        if (i < m.text.length) setTimeout(step, 16);
+        else setTimeout(send, 700);
       };
       step();
     } else if (m.type === 'cleared') {

@@ -26,6 +26,8 @@ export class AgentPanel implements vscode.WebviewViewProvider {
   private pendingCommandApprovals = new Map<string, (ok: boolean) => void>();
   private lastRunId: string | undefined;
   private backlog: unknown[] = [];
+  /** Recording mode only: low-risk command cards are approved after a visible pause. */
+  demoAutoApprove = false;
 
   constructor(
     private ctx: vscode.ExtensionContext,
@@ -172,6 +174,10 @@ export class AgentPanel implements vscode.WebviewViewProvider {
             this.pendingCommandApprovals.delete(id);
             this.post({ type: 'commandDecided', id });
           };
+          if (this.demoAutoApprove && risk.risk === 'low') {
+            setTimeout(() => settle(true), 1800);
+            return;
+          }
           if (risk.risk === 'high') {
             // High-risk commands need a deliberate, modal decision (no one-click approval from the panel).
             this.post({ type: 'commandDecided', id });
