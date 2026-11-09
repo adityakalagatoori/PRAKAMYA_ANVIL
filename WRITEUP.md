@@ -66,6 +66,8 @@ Every model is configured in TrueForge, never in the extension. Anvil only refer
 - Reasoning models (qwen3) can think for minutes before their first tool call. `anvil.modelParams` lets a user turn reasoning down per model. The panel streams reasoning tokens in a collapsible *Thinking* card, so the user sees progress instead of a frozen UI. A *Changes in this run* card and live token usage complete the panel.
 - A cold model load caused `Headers Timeout` errors. Anvil's retry-with-backoff recovered automatically in a live run. The start scripts also raise TrueForge's model timeouts.
 
+**Note:** Use the native `google-gemini` provider type for Gemini 3 models: through Gemini's OpenAI-compatible endpoint, multi-step tool calls fail with HTTP 400 because Gemini 3 thought signatures are not round-tripped.
+
 ## 6. Scorecard
 | Criterion | Video timestamp | Claim |
 |---|---|---|

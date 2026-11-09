@@ -15,7 +15,7 @@ You may cut **model waiting time**. Do **not** cut between giving an instruction
    ```
 4. Open `anvil/extension` in VS Code and press **F5**. The Flask window opens.
 5. In the Flask window's settings, set `"anvil.models": ["google-gemini/gemini-3.5-flash", "google-gemini/gemini-3.1-flash-lite"]` (or `gemini-3.8-flash` as primary) and `"anvil.modelParams": {"google-gemini/gemini-3.5-flash": {"reasoning_effort": "low"}}`.
-   - **Free-tier quotas are small** (about 5 requests/min and 20 requests/day per flash model). Do one dry run at most per model, and register two providers or projects (for example `google-gemini` plus Gemini's OpenAI-compatible endpoint as a `custom` provider, each with its own key) so fallback has quota left. Anvil waits out per-minute limits on its own; daily-quota errors fall back immediately.
+   - **Free-tier quotas are small** (about 5 requests/min and 20 requests/day per flash model). Do one dry run at most per model, and register two providers or projects (for example `google-gemini` plus Gemini's OpenAI-compatible endpoint as a `custom` provider, each with its own key) so fallback has quota left. Anvil waits out per-minute limits on its own; daily-quota errors fall back immediately. **Note:** Use the native `google-gemini` provider type for Gemini 3 models: through Gemini's OpenAI-compatible endpoint, multi-step tool calls fail with HTTP 400 because Gemini 3 thought signatures are not round-tripped.
    - Run `node scripts/register-providers.mjs --list` to confirm the exact model ids.
 6. Run **Anvil: Register Agents & MCP Server with TrueForge**.
 7. Lay out the screen: editor on the left, Anvil panel on the right, terminal at the bottom. Use a large font.

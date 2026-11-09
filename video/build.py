@@ -83,7 +83,7 @@ def render_graphic(ffmpeg, scene_id, seconds, out):
     enc.wait()
 
 
-def fit_footage(ffmpeg, ffprobe, clip, seconds, caption, out):
+def fit_footage(ffmpeg, ffprobe, clip, seconds, caption, out, speed_note=None):
     L = duration(ffprobe, clip)
     speed = L / seconds
     vf = []
@@ -95,8 +95,9 @@ def fit_footage(ffmpeg, ffprobe, clip, seconds, caption, out):
     vf.append(f"fps={FPS}")
     alpha = f"if(lt(t,0.3),0,if(lt(t,0.8),(t-0.3)/0.5,if(gt(t,{seconds - 0.6:.2f}),max(0,({seconds:.2f}-t)/0.6),1)))"
     vf.append(f"drawtext=fontfile='{FONT}':text='  {caption}  ':fontsize=34:fontcolor=white:box=1:boxcolor=0x121826@0.92:boxborderw=18:x=40:y=36:alpha='{alpha}'")
-    if speed > 1.15:
-        vf.append(f"drawtext=fontfile='{FONT}':text='  sped up x{speed:.1f}  ':fontsize=26:fontcolor=0xb8c2d6:box=1:boxcolor=0x121826@0.92:boxborderw=14:x=w-tw-60:y=40:alpha='{alpha}'")
+    badge = speed_note or (f"sped up x{speed:.1f}" if speed > 1.15 else None)
+    if badge:
+        vf.append(f"drawtext=fontfile='{FONT}':text='  {badge}  ':fontsize=26:fontcolor=0xb8c2d6:box=1:boxcolor=0x121826@0.92:boxborderw=14:x=w-tw-60:y=40:alpha='{alpha}'")
     run([ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-i", str(clip), "-an", "-vf", ",".join(vf), "-t", f"{seconds:.3f}",
          "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p", str(out)])
     return speed
@@ -161,7 +162,7 @@ def main():
                 render_graphic(ffmpeg, s["id"], seconds, vid)
                 keyf.write_text(key)
         else:
-            sp = fit_footage(ffmpeg, ffprobe, clips / f"{s['id']}.mp4", seconds, s["caption"], vid)
+            sp = fit_footage(ffmpeg, ffprobe, clips / f"{s['id']}.mp4", seconds, s["caption"], vid, s.get("speedNote"))
             print(f"3/4 footage: {s['id']} ({seconds:.1f}s, speed x{sp:.2f})")
         seg = BUILD / f"{s['id']}.seg.mp4"
         mux(ffmpeg, vid, audio, seconds, seg)

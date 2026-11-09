@@ -37,7 +37,8 @@
       "id": "agent",
       "kind": "footage",
       "caption": "Agent mode · multi-file · live",
-      "text": "Now the hard one. A single request: add a flask config command that masks secrets, register it, test it, and document it. No files named. Anvil assembles the context, and the agent explores the codebase on its own. Every edit arrives as a reviewable diff. Watch the reviewer reject a change to unrelated test infrastructure, and keep what was asked for. The tests pass, and the new command prints the configuration, with every secret masked."
+      "text": "Now the hard one. One request, and no files named: add a flask config command that prints the application's configuration as JSON, masks anything that looks like a secret, appears in flask help, is tested, and is documented. Anvil hands the agent a budgeted context pack, and the agent explores on its own, loading only the tools it needs. Every edit arrives as a diff you review hunk by hunk: the command in cli.py, a new test, and a new section in the CLI docs. When it's done, Anvil summarises exactly what changed. Then we verify: three files changed, all fifty-nine tests pass, the command shows up in flask help, and every secret in the configuration is masked.",
+      "speedNote": "model time sped up up to 40x"
     },
     {
       "id": "taskC",
