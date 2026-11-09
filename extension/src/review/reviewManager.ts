@@ -40,6 +40,8 @@ class Review {
     readonly runId: string,
     readonly title: string,
     readonly warnings: string[] = [],
+    /** Informational lines (e.g. the grounding badge); unlike warnings they need no confirmation. */
+    readonly notes: string[] = [],
   ) {
     this._proposed = original;
     this.proposedUri = vscode.Uri.from({ scheme: PROPOSED_SCHEME, path: '/' + relPath, query: `id=${id}` });
@@ -176,6 +178,7 @@ export class ReviewManager implements vscode.TextDocumentContentProvider, vscode
     if (!pending.length) return [];
     const lenses: vscode.CodeLens[] = [
       ...r.warnings.map((w) => new vscode.CodeLens(top, { title: `$(warning) ${w}`, command: '' })),
+      ...r.notes.map((n) => new vscode.CodeLens(top, { title: `$(shield) ${n}`, command: '' })),
       new vscode.CodeLens(top, { title: `$(check-all) Accept all ${pending.length} pending`, command: 'anvil.acceptAll', arguments: [r.id] }),
       new vscode.CodeLens(top, { title: '$(close-all) Reject all', command: 'anvil.rejectAll', arguments: [r.id] }),
       new vscode.CodeLens(top, { title: `${r.title} — ${r.hunks.length - pending.length}/${r.hunks.length} decided · Ctrl+Alt+Y / N per hunk`, command: '' }),
@@ -195,9 +198,9 @@ export class ReviewManager implements vscode.TextDocumentContentProvider, vscode
   }
 
   /** Opens a diff that live-updates while the model streams. Call finish() to switch to review. */
-  async openStreaming(target: vscode.Uri, original: string, opts: { runId: string; title: string; isNewFile?: boolean; warnings?: string[] }) {
+  async openStreaming(target: vscode.Uri, original: string, opts: { runId: string; title: string; isNewFile?: boolean; warnings?: string[]; notes?: string[] }) {
     const rel = this.rel(target);
-    const r = new Review(this.nextId++, target, rel, original, !!opts.isNewFile, opts.runId, opts.title, opts.warnings ?? []);
+    const r = new Review(this.nextId++, target, rel, original, !!opts.isNewFile, opts.runId, opts.title, opts.warnings ?? [], opts.notes ?? []);
     this.reviews.set(r.id, r);
     await diffOpen(r);
     return {
@@ -224,7 +227,7 @@ export class ReviewManager implements vscode.TextDocumentContentProvider, vscode
   }
 
   /** Full review of a finished proposal (agent mode). Resolves once every hunk is decided. */
-  async review(target: vscode.Uri, original: string, proposed: string, opts: { runId: string; title: string; isNewFile?: boolean; warnings?: string[] }): Promise<ReviewResult> {
+  async review(target: vscode.Uri, original: string, proposed: string, opts: { runId: string; title: string; isNewFile?: boolean; warnings?: string[]; notes?: string[] }): Promise<ReviewResult> {
     const s = await this.openStreaming(target, original, opts);
     return s.finish(proposed);
   }

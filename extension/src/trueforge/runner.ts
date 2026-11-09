@@ -8,12 +8,36 @@ import { WRITE_TOOLS, describeReview, prepareWrite, workspaceTrusted } from '../
 import { CommandRisk, analyzeCommand } from '../security/policy';
 import { audit } from '../security/audit';
 import { getConfig } from '../config';
+import { CodeIndex } from '../context/index';
+import { AdmissionReport, admissionSummary, assessAdmission, shouldHold } from '../review/grounding';
+
+function admissionHeadline(r: AdmissionReport): string {
+  const parts: string[] = [];
+  const n = (k: string) => r.issues.filter((i) => i.kind === k).length;
+  if (n('unknown')) parts.push(`${n('unknown')} unknown name(s)`);
+  if (n('stale')) parts.push(`${n('stale')} stale definition(s)`);
+  if (n('unread')) parts.push(`${n('unread')} unread definition(s)`);
+  if (r.blindSpots.length) parts.push(`${r.blindSpots.length} unseen caller/test reference(s)`);
+  return parts.join(', ') || 'grounded';
+}
+
+function admissionCard(r: AdmissionReport) {
+  return {
+    headline: admissionHeadline(r),
+    checked: r.checked,
+    grounded: r.grounded,
+    seenReferences: r.seenReferences,
+    issues: r.issues.slice(0, 8).map((i) => ({ kind: i.kind, name: i.name, line: i.line, detail: i.detail })),
+    blindSpots: r.blindSpots.slice(0, 8).map((b) => ({ symbol: b.symbol, path: b.path, line: b.line, relation: b.relation })),
+  };
+}
 
 /** UI-facing events (rendered by the agent panel; the inline editor listens to a subset). */
 export type UiEvent =
   | { t: 'run.start'; runId: string; kind: AgentKind; request: string }
   | { t: 'session'; sessionId: string; url: string; agent: string; model: string; slot: number }
   | { t: 'context'; summary: unknown }
+  | { t: 'admission'; id: string; path: string; held: boolean; report: ReturnType<typeof admissionCard> }
   | { t: 'delta'; threadId: string; text: string }
   | { t: 'reasoning'; threadId: string; text: string }
   | { t: 'message.done'; threadId: string }
@@ -68,6 +92,8 @@ export class AgentRunner {
     private undo: UndoStack,
     private runs: RunState,
     private log: vscode.OutputChannel,
+    /** Code index for the admission check (optional: without it the check is skipped). */
+    private index?: { ready(): Promise<CodeIndex> },
   ) {}
 
   get isRunning() {
@@ -87,10 +113,17 @@ export class AgentRunner {
     if (cur.sessionId) await this.gw.cancel(cur.sessionId);
   }
 
-  async run(kind: AgentKind, input: string, sink: RunSink, opts: { continueConversation?: boolean; title?: string } = {}): Promise<RunResult> {
+  async run(
+    kind: AgentKind,
+    input: string,
+    sink: RunSink,
+    opts: { continueConversation?: boolean; title?: string; observations?: { path: string; line: number; text: string }[] } = {},
+  ): Promise<RunResult> {
     if (this.current) throw new Error('A run is already in progress. Cancel it first.');
     const runId = `${kind}-${Date.now().toString(36)}`;
-    const run = this.runs.start(runId);
+    const run = this.runs.start(runId, { keepObservations: !!opts.continueConversation });
+    // Everything placed in the prompt counts as seen by the model (context pack, selection…).
+    for (const o of opts.observations ?? []) this.runs.ledger.record(o.path, o.line, o.text, 'context');
     this.current = { runId };
     void vscode.commands.executeCommand('setContext', 'anvil.running', true);
     sink.emit({ t: 'run.start', runId, kind, request: opts.title ?? input.slice(0, 200) });
@@ -340,8 +373,42 @@ export class AgentRunner {
         sink.emit({ t: 'approval.resolved', id, allowed: false, summary: prepared.error });
         return { status: 'deny', reason: `Anvil could not build a diff: ${prepared.error}` };
       }
+      // ---- Observation-grounded admission: before a human spends attention on this edit, check that
+      // what it relies on is backed by code the model actually saw. If not, hold it and show the model
+      // exactly what it missed; it then confirms or revises. ----
+      const notes: string[] = [];
+      const mode = getConfig().admissionCheck;
+      if (mode !== 'off' && this.index) {
+        try {
+          const idx = await this.index.ready();
+          const report = assessAdmission(idx, this.runs.ledger, prepared.rel, prepared.original, prepared.proposed);
+          const holds = this.runs.admissionHolds.get(prepared.rel) ?? 0;
+          if (mode === 'hold' && shouldHold(report) && holds < 2) {
+            this.runs.admissionHolds.set(prepared.rel, holds + 1);
+            const reason = this.admissionHold(report, idx, prepared.rel, prepared.proposed);
+            audit.record('admission.hold', { path: prepared.rel, issues: report.issues.map((i) => `${i.kind}:${i.name}`), blindSpots: report.blindSpots.length, round: holds + 1 });
+            sink.emit({ t: 'admission', id, path: prepared.rel, held: true, report: admissionCard(report) });
+            sink.emit({ t: 'approval.resolved', id, allowed: false, summary: `Held before review: ${admissionHeadline(report)}` });
+            return { status: 'deny', reason };
+          }
+          if (report.language === 'python' && report.checked + report.blindSpots.length + report.seenReferences > 0) {
+            notes.push(admissionSummary(report));
+            for (const i of report.issues.slice(0, 3)) notes.push(`${i.kind === 'unknown' ? 'Unknown name' : i.kind === 'stale' ? 'Stale view' : 'Not read'}: ${i.name} (line ${i.line}) — ${i.detail}`);
+            if (report.blindSpots.length) notes.push(`Unseen references to changed signature(s): ${report.blindSpots.slice(0, 3).map((b) => `${b.path}:${b.line}`).join(', ')}${report.blindSpots.length > 3 ? ` +${report.blindSpots.length - 3}` : ''}`);
+            sink.emit({ t: 'admission', id, path: prepared.rel, held: false, report: admissionCard(report) });
+            audit.record('admission.pass', { path: prepared.rel, checked: report.checked, grounded: report.grounded, issues: report.issues.length, blindSpots: report.blindSpots.length });
+          }
+        } catch (e) {
+          this.log.appendLine(`[admission] skipped: ${(e as Error).message}`);
+        }
+      }
       sink.emit({ t: 'approval', id, name: info.name, summary: `Review ${prepared.rel} in the diff editor (accept/reject each hunk)`, warnings: prepared.warnings });
-      const review = await this.reviews.review(prepared.uri, prepared.original, prepared.proposed, { runId, title: `${info.name} ${prepared.rel}`, isNewFile: prepared.isNewFile, warnings: prepared.warnings });
+      const review = await this.reviews.review(prepared.uri, prepared.original, prepared.proposed, { runId, title: `${info.name} ${prepared.rel}`, isNewFile: prepared.isNewFile, warnings: prepared.warnings, notes });
+      // The model knows what it wrote: accepted content counts as observed.
+      if (review.accepted.length) {
+        const written = info.name === 'create_file' ? String(info.args?.content ?? '') : String(info.args?.new_string ?? '');
+        this.runs.ledger.record(prepared.rel, 1, written, 'own_edit');
+      }
       const summary = describeReview(prepared.rel, review);
       if (signal.aborted || review.status === 'cancelled') return { status: 'deny', reason: 'Run cancelled by the user.' };
       this.runs.recordDecision(canonicalKey(info.name, info.args), { tool: info.name, path: prepared.rel, review, createdAt: Date.now() });
@@ -363,6 +430,51 @@ export class AgentRunner {
     }
     // Read-only or harness tools that ended up gated: allow.
     return { status: 'allow' };
+  }
+
+  /**
+   * Builds the denial message for a held edit and records what it shows the model in the ledger,
+   * so a resubmission is judged against the model's updated knowledge.
+   */
+  private admissionHold(r: AdmissionReport, idx: CodeIndex, rel: string, proposed: string): string {
+    const out: string[] = [
+      `Anvil's admission check held this edit to ${rel} BEFORE showing it to the user, because it relies on code you have not seen in this conversation.`,
+    ];
+    let budget = 9000; // characters of evidence to include
+    const add = (s: string) => {
+      if (budget <= 0) return;
+      out.push(s.length > budget ? s.slice(0, budget) + '\n…' : s);
+      budget -= s.length;
+    };
+    const unknown = r.issues.filter((i) => i.kind === 'unknown');
+    if (unknown.length) {
+      add(`\nNames that do not exist anywhere in this repository (likely wrong): ${unknown.map((i) => `${i.name} (line ${i.line}: ${i.detail})`).join('; ')}. Use find_symbol / search_code to find the real name.`);
+    }
+    for (const i of r.issues.filter((x) => x.kind !== 'unknown' && x.def)) {
+      const c = idx.chunkAt(i.def!.path, i.def!.line);
+      if (!c) continue;
+      const text = c.text.split('\n').slice(0, 40).join('\n');
+      this.runs.ledger.record(c.path, c.startLine, text, 'admission');
+      add(`\n${i.kind === 'stale' ? 'This definition CHANGED since you read it' : 'Definition you used without reading it'} — ${c.path}:${c.startLine}${c.symbol ? ` (${c.symbol})` : ''}:\n\`\`\`\n${text}\n\`\`\``);
+    }
+    if (r.blindSpots.length) {
+      const bySym = new Map<string, typeof r.blindSpots>();
+      for (const b of r.blindSpots) bySym.set(b.symbol, [...(bySym.get(b.symbol) ?? []), b]);
+      for (const [sym, spots] of bySym) {
+        add(`\nYour edit changes the signature of ${sym}${spots[0].change === 'removed' ? ' (removes it)' : ''}. These references have not been shown to you:`);
+        for (const b of spots) {
+          const text = b.path === rel ? proposed : idx.files.get(b.path)?.text ?? '';
+          const lines = text.split(/\r?\n/);
+          const s = Math.max(0, b.line - 3);
+          const snippet = lines.slice(s, b.line + 2);
+          this.runs.ledger.record(b.path, s + 1, snippet.join('\n'), 'admission');
+          add(`- ${b.path}:${b.line} (${b.relation})\n\`\`\`\n${snippet.join('\n')}\n\`\`\``);
+        }
+      }
+      add('Update the callers/tests/docs that need it, or keep the old signature compatible.');
+    }
+    add('\nNow re-check your edit against this code. If it is still correct, re-issue the SAME edit_file/create_file call unchanged; otherwise issue a corrected one. The user has not seen this edit yet.');
+    return out.join('\n');
   }
 
   private raceAbort<T>(p: Promise<T>, signal: AbortSignal, onAbort: T): Promise<T> {

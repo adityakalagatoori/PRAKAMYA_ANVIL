@@ -10,6 +10,8 @@ export interface AnvilConfig {
   iterationLimit: number;
   modelParams: Record<string, Record<string, unknown>>;
   passSecretsToCommands: boolean;
+  /** Observation-grounded admission check before human review: hold, annotate only, or off. */
+  admissionCheck: 'hold' | 'annotate' | 'off';
 }
 
 export function getConfig(): AnvilConfig {
@@ -24,5 +26,6 @@ export function getConfig(): AnvilConfig {
     iterationLimit: c.get<number>('iterationLimit') ?? 60,
     modelParams: c.get<Record<string, Record<string, unknown>>>('modelParams') ?? {},
     passSecretsToCommands: c.get<boolean>('passSecretsToCommands') ?? false,
+    admissionCheck: (c.get<string>('admissionCheck') as AnvilConfig['admissionCheck']) ?? 'hold',
   };
 }

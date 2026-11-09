@@ -64,3 +64,7 @@ code { font-family: var(--vscode-editor-font-family); background: var(--vscode-t
 .risk.medium { background: var(--vscode-editorWarning-foreground, #d29922); color: #000; }
 .risk.high { background: var(--vscode-inputValidation-errorBorder, #f85149); color: #fff; }
 code.cmd { white-space: pre-wrap; word-break: break-all; flex-basis: 100%; }
+.dot.warn { background: var(--vscode-editorWarning-foreground, #d29922); }
+.card.admission.held { border-left: 3px solid var(--vscode-editorWarning-foreground, #d29922); }
+.tag.unknown { background: var(--vscode-inputValidation-errorBackground, #5a1d1d); color: var(--vscode-errorForeground, #f85149); }
+.tag.stale, .tag.unread { background: var(--vscode-inputValidation-warningBackground, #352a05); color: var(--vscode-editorWarning-foreground, #d29922); }

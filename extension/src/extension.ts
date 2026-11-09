@@ -78,7 +78,7 @@ export async function activate(ctx: vscode.ExtensionContext) {
   const mcpInfo = () => ({ url: `http://${getConfig().mcpPublicHost}:${mcpPort}/mcp`, token: token! });
 
   const gateway = new TrueForgeGateway(log, mcpInfo);
-  const runner = new AgentRunner(gateway, reviews, undo, runs, log);
+  const runner = new AgentRunner(gateway, reviews, undo, runs, log, index);
   const panel = new AgentPanel(ctx, runner, index, undo, log);
   ctx.subscriptions.push(vscode.window.registerWebviewViewProvider(AgentPanel.viewId, panel, { webviewOptions: { retainContextWhenHidden: true } }));
 

@@ -200,7 +200,8 @@ export class AgentPanel implements vscode.WebviewViewProvider {
           });
         }),
     };
-    const res = await this.runner.run('coder', message, sink, { continueConversation: true, title: text.slice(0, 80) });
+    const observations = pack.items.map((i) => ({ path: i.path, line: i.startLine, text: i.text }));
+    const res = await this.runner.run('coder', message, sink, { continueConversation: true, title: text.slice(0, 80), observations });
     for (const [, r] of this.pendingCommandApprovals) r(false);
     this.pendingCommandApprovals.clear();
     if (res.status === 'cancelled') {

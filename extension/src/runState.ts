@@ -1,5 +1,6 @@
 import { ReviewResult } from './review/reviewManager';
 import { LoopGuard } from './security/policy';
+import { ObservationLedger } from './context/observation';
 
 /**
  * Shared state between the run controller (which sees TrueForge events and drives reviews)
@@ -37,12 +38,18 @@ export class RunState {
   private approvedCommands = new Map<string, number>();
   /** Circuit breaker for repeated identical tool calls / runaway runs. */
   readonly loopGuard = new LoopGuard(3, 250);
+  /** What the model has been shown in this conversation (kept across turns of a continued conversation). */
+  readonly ledger = new ObservationLedger();
+  /** Admission holds per file in the current run (the check holds an edit back at most twice per file). */
+  readonly admissionHolds = new Map<string, number>();
 
-  start(id: string): ActiveRun {
+  start(id: string, opts: { keepObservations?: boolean } = {}): ActiveRun {
     this.active = { id, cancelled: false, abort: new AbortController() };
     this.decisions.clear();
     this.approvedCommands.clear();
     this.loopGuard.reset();
+    this.admissionHolds.clear();
+    if (!opts.keepObservations) this.ledger.clear();
     return this.active;
   }
 

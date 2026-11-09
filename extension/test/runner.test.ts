@@ -248,3 +248,51 @@ test('daily quota exhausted → immediate fallback (no futile waiting)', async (
   assert.equal(primary, 1);
   assert.ok(Date.now() - t0 < 1500);
 });
+
+test('admission gate: an edit relying on a name that does not exist is held before review; the corrected edit reaches review', { skip: !have }, async () => {
+  const { CodeIndex } = await import('../src/context/index');
+  const { readFileSync, readdirSync, statSync } = await import('node:fs');
+  const { relative } = await import('node:path');
+  const files: { path: string; text: string }[] = [];
+  const walk = (dir: string) => {
+    for (const name of readdirSync(dir)) {
+      if (name.startsWith('.') || name === '__pycache__') continue;
+      const full = join(dir, name);
+      if (statSync(full).isDirectory()) walk(full);
+      else if (/\.(py|rst)$/.test(name)) files.push({ path: relative(FLASK, full).split('\\').join('/'), text: readFileSync(full, 'utf8') });
+    }
+  };
+  walk(FLASK);
+  const idx = CodeIndex.build(files);
+  const bad = { path: 'src/flask/cli.py', old_string: 'from .globals import current_app', new_string: 'from .globals import current_app\nfrom .helpers import get_debug_mode' };
+  const good = { path: 'src/flask/cli.py', old_string: 'from .globals import current_app', new_string: 'from .globals import current_app\nfrom .helpers import get_debug_flag as _debug_flag' };
+  let turn = 0;
+  const { gw, calls } = fakeGateway(['m/1'], async (_s, _input, emit) => {
+    turn++;
+    if (turn === 1 || turn === 2) {
+      const args = turn === 1 ? bad : good;
+      emit({ type: 'model.message', id: `m${turn}`, threadId: 'main', createdAt: '', toolCalls: [{ id: `tc${turn}`, type: 'function', function: { name: 'edit_file', arguments: JSON.stringify(args) } }] });
+      emit({ type: 'tool.approval_required', id: `a${turn}`, threadId: 'main', createdAt: '', toolCalls: [{ id: `tc${turn}`, sourceEventId: `m${turn}` }] });
+      return done();
+    }
+    emit({ type: 'model.message', id: 'm9', threadId: 'main', createdAt: '', content: 'Done.' });
+    return done();
+  });
+  const reviewed: string[] = [];
+  const reviews = { cancelAll() {}, review: async (_u: any, _o: string, proposed: string, opts: any) => (reviewed.push(proposed), (reviews as any).notes = opts.notes, { status: 'decided', accepted: [0], rejected: [], total: 1, finalText: proposed, hunks: [] }) };
+  const runs = new RunState();
+  const events: UiEvent[] = [];
+  const runner = new AgentRunner(gw, reviews as any, { forRun: () => [] } as any, runs, log, { ready: async () => idx });
+  // The context pack showed cli.py to the model.
+  const r = await runner.run('coder', 'x', sinkOf(events), { observations: [{ path: 'src/flask/cli.py', line: 1, text: idx.files.get('src/flask/cli.py')!.text }] });
+  assert.equal(r.status, 'done');
+  const first = calls.inputs[1][0];
+  assert.equal(first.approval.status, 'deny', 'the hallucinated import is held');
+  assert.match(first.approval.reason, /get_debug_mode/);
+  assert.match(first.approval.reason, /BEFORE showing it to the user/);
+  assert.equal(reviewed.length, 1, 'only the corrected edit reached the human');
+  assert.ok(reviewed[0].includes('get_debug_flag as _debug_flag'));
+  assert.equal(calls.inputs[2][0].approval.status, 'allow');
+  assert.ok(events.some((e) => e.t === 'admission' && e.held));
+  assert.ok(((reviews as any).notes as string[]).some((n) => /^Grounding: /.test(n)), 'the review shows the grounding badge');
+});

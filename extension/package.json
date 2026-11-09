@@ -212,6 +212,17 @@
           },
           "markdownDescription": "Per-model parameter overrides merged into the agent's `model.params`, keyed by model id. Example: `{\"ollama/qwen3-4b\": {\"reasoning_effort\": \"none\"}}` turns off long thinking for a small local reasoning model."
         },
+        "anvil.admissionCheck": {
+          "type": "string",
+          "enum": ["hold", "annotate", "off"],
+          "default": "hold",
+          "enumDescriptions": [
+            "Before you review an edit, check that every name it relies on is backed by code the model actually saw (and that is still current), and that the model saw the callers/tests of any signature it changes. If not, hold the edit back, show the model what it missed, and let it confirm or revise (at most twice per file).",
+            "Run the check and show the result on the diff, but never hold an edit back.",
+            "Disable the check."
+          ],
+          "markdownDescription": "Observation-grounded admission check for agent edits (see enum descriptions)."
+        },
         "anvil.passSecretsToCommands": {
           "type": "boolean",
           "default": false,

@@ -99,9 +99,54 @@
     log.append(c);
   }
 
+  /** Observation-grounded admission result for one proposed edit (held back or passed to review). */
+  function renderAdmission(e) {
+    const r = e.report;
+    const title = e.held ? 'Held before review' : 'Grounding check';
+    const sub = e.held ? `${e.path} · ${r.headline} — shown to the model` : `${e.path} · ${r.grounded}/${r.checked} names backed by code the model saw`;
+    const c = card(title, sub, 'admission' + (e.held ? ' held' : ''), !e.held);
+    c._dot.className = 'dot ' + (e.held ? 'warn' : r.issues.length || r.blindSpots.length ? 'warn' : 'ok');
+    const b = c._body;
+    b.style.fontFamily = 'var(--vscode-font-family)';
+    b.append(
+      el(
+        'div',
+        'muted',
+        e.held
+          ? 'The user has not seen this edit. Anvil sent the model the code it relied on without reading; it will confirm or revise before you review.'
+          : 'Checked before the diff opened.',
+      ),
+    );
+    const table = el('table', 'ctx-table');
+    const label = { unknown: 'unknown', stale: 'stale', unread: 'unread' };
+    for (const i of r.issues) {
+      const tr = el('tr');
+      const p = el('td', 'path');
+      p.append(el('span', 'tag ' + i.kind, label[i.kind] || i.kind), el('span', '', ` ${i.name}`));
+      tr.append(p, el('td', 'why', `line ${i.line} — ${i.detail}`));
+      table.append(tr);
+    }
+    for (const s of r.blindSpots) {
+      const tr = el('tr');
+      const p = el('td', 'path');
+      const a = el('a', '', `${s.path}:${s.line}`);
+      a.onclick = () => vscode.postMessage({ type: 'open', path: s.path, line: s.line });
+      p.append(el('span', 'tag', s.relation), a);
+      tr.append(p, el('td', 'why', `references ${s.symbol}(), whose signature this edit changes — not yet seen by the model`));
+      table.append(tr);
+    }
+    if (table.childElementCount) b.append(table);
+    if (r.seenReferences) b.append(el('div', 'muted', `${r.seenReferences} reference(s) to changed signatures were already seen by the model.`));
+    container('main').append(c);
+    scroll();
+  }
+
   function onUi(e) {
     clearEmpty();
     switch (e.t) {
+      case 'admission':
+        renderAdmission(e);
+        break;
       case 'run.start':
         setRunning(true, e.kind === 'inline' ? 'inline edit' : 'running');
         currentAssistant = {};

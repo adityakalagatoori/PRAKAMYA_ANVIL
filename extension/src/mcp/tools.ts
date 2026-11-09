@@ -157,6 +157,7 @@ export const TOOLS: ToolDef[] = [
       const idx = await d.index.ready();
       const budget = Math.min(8000, Math.max(300, Math.round(Number(a.budget_tokens) || 2500)));
       const pack = assembleContext(idx, a.query, { budget, maxRepoMapTokens: 300 });
+      for (const it of pack.items) d.runs.ledger.record(it.path, it.startLine, it.text, 'retrieve_context');
       const s = summarizePack(pack);
       const header = [`Retrieved ${s.items.length} chunks from ${new Set(s.items.map((i) => i.path)).size} files (${s.used}/${s.budget} tokens):`, ...s.items.map((i) => `- ${i.path}:${i.lines}${i.symbol ? ' ' + i.symbol : ''} — ${i.reason}`)].join('\n');
       return header + '\n\n' + renderPack(pack);
@@ -192,13 +193,18 @@ export const TOOLS: ToolDef[] = [
           break;
         }
         const lines = f.text.split(/\r?\n/);
+        const hits: { line: number; text: string }[] = [];
         for (let i = 0; i < lines.length; i++) {
           if (lines[i].length > 2000) continue; // minified/generated lines: skip
           if (re.test(lines[i])) {
             total++;
-            if (out.length < max) out.push(`${f.path}:${i + 1}: ${lines[i].trim().slice(0, 200)}`);
+            if (out.length < max) {
+              out.push(`${f.path}:${i + 1}: ${lines[i].trim().slice(0, 200)}`);
+              hits.push({ line: i + 1, text: lines[i] });
+            }
           }
         }
+        if (hits.length) d.runs.ledger.recordLines(f.path, hits, 'search_code');
       }
       const note = truncated ? '\n[search stopped after 3s; narrow it with path_glob]' : '';
       if (!out.length) return 'No matches.' + note;
@@ -219,6 +225,7 @@ export const TOOLS: ToolDef[] = [
         .map((s) => {
           const c = idx.chunkAt(s.path, s.line);
           const preview = c ? c.text.split('\n').slice(0, 6).join('\n') : '';
+          if (c) d.runs.ledger.record(s.path, c.startLine, preview, 'find_symbol');
           return `${s.kind} ${s.qualified} — ${s.path}:${s.line}${c ? ` (lines ${c.startLine}-${c.endLine})` : ''}\n${preview}`;
         })
         .join('\n\n');
@@ -229,7 +236,7 @@ export const TOOLS: ToolDef[] = [
     kind: 'read',
     description: `Read a file (or a line range). Returns at most ${MAX_READ_LINES} lines per call; the header says the total line count. Always read before editing.`,
     schema: { path: z.string(), start_line: z.number().int().min(1).optional(), end_line: z.number().int().min(1).optional() },
-    async run(a) {
+    async run(a, d) {
       const { uri, rel } = resolvePath(a.path);
       if (isSecretPath(rel)) {
         audit.record('blocked.read', { path: rel });
@@ -241,6 +248,7 @@ export const TOOLS: ToolDef[] = [
       const s = Math.max(1, a.start_line ?? 1);
       const e = Math.min(lines.length, a.end_line ?? s + MAX_READ_LINES - 1, s + MAX_READ_LINES - 1);
       const more = e < lines.length ? `\n[… ${lines.length - e} more lines; call read_file with start_line=${e + 1}]` : '';
+      d.runs.ledger.record(rel, s, lines.slice(s - 1, e).join('\n'), 'read_file');
       return `${rel} (lines ${s}-${e} of ${lines.length})\n${lines.slice(s - 1, e).join('\n')}${more}`;
     },
   },
