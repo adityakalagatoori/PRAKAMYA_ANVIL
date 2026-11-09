@@ -22,7 +22,8 @@ export class AuditLog {
   record(event: string, data: Record<string, unknown> = {}) {
     const file = this.file;
     if (!file || !this.dir) return;
-    const line = JSON.stringify({ ts: new Date().toISOString(), event, ...data }) + '\n';
+    // The audit trail must not become a secret store itself.
+    const line = redactSecrets(JSON.stringify({ ts: new Date().toISOString(), event, ...data })).text + '\n';
     const dir = this.dir;
     this.queue = this.queue.then(() => mkdir(dir, { recursive: true }).then(() => appendFile(file, line, 'utf8'))).catch(() => undefined);
   }
