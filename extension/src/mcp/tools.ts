@@ -5,6 +5,10 @@ import * as path from 'node:path';
 import { z } from 'zod';
 import { badSegment, classifyPath, editWarnings, isSecretPath, safeRegex, sanitizeTerminal, scrubEnv } from '../security/policy';
 import { audit } from '../security/audit';
+import { describeHit, vault } from '../security/honeytoken';
+import { bindingHolds } from '../security/execution';
+import { ContractEnv, evaluate } from '../review/contract';
+import { readFileSync } from 'node:fs';
 import { WorkspaceIndex } from '../context/workspaceIndex';
 import { assembleContext, buildRepoMap, renderPack, summarizePack } from '../context/assembler';
 import { applySearchReplace } from '../review/diff';
@@ -117,14 +121,24 @@ export async function prepareWrite(tool: string, args: any): Promise<PreparedWri
     const cls = classifyPath(rel);
     if (cls.level === 'blocked') return { error: `${rel} is protected: ${cls.reason}.` };
     const current = await readText(uri);
+    // Honeytokens: decoys the model saw are rehydrated only into the file that already holds the
+    // real secret; carrying one anywhere else is refused.
+    const hydrate = (s: string) => {
+      const h = vault.rehydrateFor(s, current ?? '');
+      if (h.foreign.length) {
+        audit.record('exfil.blocked', { sink: tool, path: rel, labels: h.foreign.map((e) => e.label) });
+        throw new Error(`refused: this would write a ${h.foreign[0].label} credential into ${rel}, where it does not already exist. Credentials are never copied by the agent; reference an environment variable or config setting instead.`);
+      }
+      return h.text;
+    };
     if (tool === 'create_file') {
       if (current !== undefined) return { error: `${rel} already exists. Use edit_file to change it.` };
-      const proposed = String(args?.content ?? '');
+      const proposed = hydrate(String(args?.content ?? ''));
       return { tool, uri, rel, original: '', proposed, isNewFile: true, warnings: editWarnings(rel, '', proposed) };
     }
     if (tool === 'edit_file') {
       if (current === undefined) return { error: `${rel} does not exist. Use create_file for new files.` };
-      const r = applySearchReplace(current, String(args?.old_string ?? ''), String(args?.new_string ?? ''));
+      const r = applySearchReplace(current, hydrate(String(args?.old_string ?? '')), hydrate(String(args?.new_string ?? '')));
       if (!r.ok) return { error: `${rel}: ${r.error}` };
       if (r.result === current) return { error: `${rel}: old_string and new_string are identical; nothing to change.` };
       return { tool, uri, rel, original: current, proposed: r.result, isNewFile: false, warnings: editWarnings(rel, current, r.result) };
@@ -141,7 +155,10 @@ export function describeReview(rel: string, r: ReviewResult): string {
   if (!r.accepted.length) return `The user REJECTED all ${r.total} hunk(s) for ${rel}. The file is unchanged. Do not retry the same edit; ask or try a different approach.`;
   if (r.accepted.length === r.total) return `Applied all ${r.total} hunk(s) to ${rel} (user accepted).`;
   const rej = r.rejected.map((i) => i + 1).join(', ');
-  return `Applied ${r.accepted.length}/${r.total} hunk(s) to ${rel}. The user rejected hunk(s) ${rej}; those parts were NOT applied. Re-read the file before further edits.`;
+  const broken = r.dangling?.length
+    ? ` WARNING: the accepted subset leaves ${r.dangling.map((d) => `${d.name} (line ${d.line})`).join(', ')} referenced but undefined in ${rel}. Fix this (define it again or remove the references) before anything else.`
+    : '';
+  return `Applied ${r.accepted.length}/${r.total} hunk(s) to ${rel}. The user rejected hunk(s) ${rej}; those parts were NOT applied. Re-read the file before further edits.${broken}`;
 }
 
 const MAX_READ_LINES = 400;
@@ -310,15 +327,66 @@ export const TOOLS: ToolDef[] = [
     kind: 'write',
     description:
       'Propose an edit: replace old_string (must match the file exactly once, including indentation; include a few surrounding lines to make it unique) with new_string. The user reviews every hunk in a diff before anything is written; the result tells you which hunks were accepted.',
-    schema: { path: z.string(), old_string: z.string(), new_string: z.string() },
+    schema: {
+      path: z.string(),
+      old_string: z.string(),
+      new_string: z.string(),
+      clauses: z.array(z.string()).optional().describe('Ids of the intent-contract clauses this edit serves (if a contract was approved)'),
+    },
     run: (a, d) => runWrite('edit_file', a, d),
   },
   {
     name: 'create_file',
     kind: 'write',
     description: 'Propose a new file with the given content. The user reviews it before it is written. Fails if the file exists (use edit_file).',
-    schema: { path: z.string(), content: z.string() },
+    schema: { path: z.string(), content: z.string(), clauses: z.array(z.string()).optional().describe('Ids of the intent-contract clauses this file serves') },
     run: (a, d) => runWrite('create_file', a, d),
+  },
+  {
+    name: 'propose_contract',
+    kind: 'write',
+    description:
+      'For any change request, call this FIRST (before editing): compile the request into checkable acceptance clauses. The user approves them; Anvil then tracks them live and will not let you finish while a required clause fails. Check types: command_succeeds {command}, command_output {command, pattern(regex), absent?}, file_contains {path, pattern(regex), absent?}, symbol_exists {name}, not_modified {path_glob} (files you must NOT touch). Cover behaviour, tests and docs; add not_modified clauses for files outside the task (e.g. test fixtures).',
+    schema: {
+      clauses: z
+        .array(
+          z.object({
+            id: z.string().optional(),
+            text: z.string().describe('The requirement in plain words'),
+            required: z.boolean().optional(),
+            check: z.object({
+              type: z.enum(['command_succeeds', 'command_output', 'file_contains', 'symbol_exists', 'not_modified']),
+              command: z.string().optional(),
+              pattern: z.string().optional(),
+              absent: z.boolean().optional(),
+              path: z.string().optional(),
+              name: z.string().optional(),
+              path_glob: z.string().optional(),
+            }),
+          }),
+        )
+        .min(1)
+        .max(20),
+    },
+    async run(_a, d) {
+      const c = d.runs.contract;
+      if (!c) return 'The contract was not approved by the user. Do not proceed as if it was; continue carefully or ask.';
+      return `Contract approved (${c.clauses.length} clauses: ${c.clauses.map((x) => x.id).join(', ')}). Tag each edit_file/create_file with the clause ids it serves (clauses argument). Call check_contract to see the live status.`;
+    },
+  },
+  {
+    name: 'check_contract',
+    kind: 'read',
+    description: 'Evaluates the approved intent contract now (including its approved commands) and returns each clause as pass/fail with evidence.',
+    schema: {},
+    async run(_a, d) {
+      const c = d.runs.contract;
+      if (!c) return 'No intent contract has been approved in this run.';
+      const run = d.runs.active;
+      if (!run || run.cancelled) return 'No active run.';
+      const results = await evaluate(c, contractEnv(d), { commands: true });
+      return results.map((r) => `${r.id}: ${r.state.toUpperCase()} — ${r.detail}`).join('\n');
+    },
   },
   {
     name: 'run_command',
@@ -330,6 +398,29 @@ export const TOOLS: ToolDef[] = [
       const run = d.runs.active;
       if (!run || run.cancelled) return 'No active run (cancelled). Command not executed.';
       if (!workspaceTrusted()) return 'This workspace is not trusted (Restricted Mode). Anvil does not run commands in untrusted workspaces.';
+      const leaks = vault.scan(String(a.command ?? ''));
+      if (leaks.length) {
+        audit.record('exfil.blocked', { sink: 'run_command', labels: leaks.map((l) => l.entry.label), encodings: leaks.map((l) => l.encoding) });
+        return `Blocked: this command carries a ${describeHit(leaks[0])}. Anvil never lets credentials leave through agent commands.`;
+      }
+      // Edit-to-execution binding: the approval covered specific contents of the agent-modified
+      // files this command runs. If any changed since, the approval no longer describes what runs.
+      const binding = d.runs.peekBinding(String(a.command ?? ''));
+      if (binding && Object.keys(binding).length) {
+        const root = workspaceRoot()!.fsPath;
+        const held = bindingHolds(binding, (p) => {
+          try {
+            return readFileSync(path.join(root, p), 'utf8');
+          } catch {
+            return undefined;
+          }
+        });
+        if (!held.ok) {
+          d.runs.isCommandApproved(String(a.command ?? '')); // consume the now-invalid approval
+          audit.record('blocked.command', { command: a.command, reason: 'bound files changed after approval', changed: held.changed });
+          return `Command not executed: ${held.changed.join(', ')} changed after the user approved this command, so the approval no longer covers the code it would run. Ask again.`;
+        }
+      }
       if (!d.runs.isCommandApproved(String(a.command ?? ''))) {
         // Commands only ever run after an explicit user approval. If TrueForge's approval gate did
         // not fire (misconfigured agent), ask here; never run unapproved.
@@ -343,6 +434,32 @@ export const TOOLS: ToolDef[] = [
     },
   },
 ];
+
+/** How contract checks see the workspace: disk contents, the symbol index, the Anvil terminal. */
+export function contractEnv(d: ToolDeps, modified?: () => string[]): ContractEnv & { ready(): Promise<void> } {
+  const root = workspaceRoot()!.fsPath;
+  let idx: Awaited<ReturnType<WorkspaceIndex['ready']>> | undefined;
+  return {
+    ready: async () => {
+      idx = await d.index.ready();
+    },
+    read: (p) => {
+      try {
+        return readFileSync(path.join(root, p), 'utf8');
+      } catch {
+        return undefined;
+      }
+    },
+    symbolExists: (n) => !!idx?.findSymbol(n).some((s) => s.name === n || s.qualified === n),
+    modified: modified ?? (() => [...d.runs.agentWrites.keys()]),
+    run: async (cmd) => {
+      const signal = d.runs.active?.abort.signal ?? new AbortController().signal;
+      const out = await d.terminal.run(cmd, 180_000, signal);
+      const m = out.match(/^exit code: (-?\d+|null)/);
+      return { code: m && m[1] !== 'null' ? Number(m[1]) : null, output: out };
+    },
+  };
+}
 
 async function runWrite(tool: string, args: any, d: ToolDeps): Promise<string> {
   const run = d.runs.active;

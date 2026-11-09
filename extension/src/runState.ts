@@ -1,6 +1,7 @@
 import { ReviewResult } from './review/reviewManager';
 import { LoopGuard } from './security/policy';
 import { ObservationLedger } from './context/observation';
+import { Contract } from './review/contract';
 
 /**
  * Shared state between the run controller (which sees TrueForge events and drives reviews)
@@ -42,6 +43,14 @@ export class RunState {
   readonly ledger = new ObservationLedger();
   /** Admission holds per file in the current run (the check holds an edit back at most twice per file). */
   readonly admissionHolds = new Map<string, number>();
+  /** Code the agent added per file in this conversation (edit-to-execution binding). */
+  readonly agentWrites = new Map<string, string>();
+  /** The intent contract the user approved for the current run (if the agent proposed one). */
+  contract: Contract | undefined;
+  /** How many times the finish gate has withheld completion in this run. */
+  gateRounds = 0;
+  /** Content hashes each approved command is bound to (FIFO per command string). */
+  private commandBindings = new Map<string, Record<string, string>[]>();
 
   start(id: string, opts: { keepObservations?: boolean } = {}): ActiveRun {
     this.active = { id, cancelled: false, abort: new AbortController() };
@@ -49,12 +58,30 @@ export class RunState {
     this.approvedCommands.clear();
     this.loopGuard.reset();
     this.admissionHolds.clear();
-    if (!opts.keepObservations) this.ledger.clear();
+    this.commandBindings.clear();
+    this.contract = undefined;
+    this.gateRounds = 0;
+    if (!opts.keepObservations) {
+      this.ledger.clear();
+      this.agentWrites.clear();
+    }
     return this.active;
   }
 
-  approveCommand(cmd: string) {
+  approveCommand(cmd: string, binding?: Record<string, string>) {
     this.approvedCommands.set(cmd, (this.approvedCommands.get(cmd) ?? 0) + 1);
+    const q = this.commandBindings.get(cmd) ?? [];
+    q.push(binding ?? {});
+    this.commandBindings.set(cmd, q);
+  }
+
+  /** The content-hash binding of the oldest pending approval for this command (if any). */
+  peekBinding(cmd: string): Record<string, string> | undefined {
+    return this.commandBindings.get(cmd)?.[0];
+  }
+
+  recordAgentWrite(path: string, added: string) {
+    this.agentWrites.set(path, ((this.agentWrites.get(path) ?? '') + '\n' + added).slice(-200_000));
   }
 
   /** True (and consumes the approval) if the user approved exactly this command in this run. */
@@ -62,6 +89,7 @@ export class RunState {
     const n = this.approvedCommands.get(cmd) ?? 0;
     if (n <= 0) return false;
     this.approvedCommands.set(cmd, n - 1);
+    this.commandBindings.get(cmd)?.shift();
     return true;
   }
 

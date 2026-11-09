@@ -296,3 +296,60 @@ test('admission gate: an edit relying on a name that does not exist is held befo
   assert.ok(events.some((e) => e.t === 'admission' && e.held));
   assert.ok(((reviews as any).notes as string[]).some((n) => /^Grounding: /.test(n)), 'the review shows the grounding badge');
 });
+
+test('finish gate: the run cannot end while an approved contract clause fails; the agent gets the evidence and fixes it', { skip: !have }, async () => {
+  const { CodeIndex } = await import('../src/context/index');
+  const contract = { clauses: [{ id: 'C1', text: 'help lists config', check: { type: 'command_output', command: 'flask --help', pattern: 'config' } }] };
+  let turn = 0;
+  const { gw, calls } = fakeGateway(['m/1'], async (_s, _input, emit) => {
+    turn++;
+    if (turn === 1) {
+      emit({ type: 'model.message', id: 'm1', threadId: 'main', createdAt: '', toolCalls: [{ id: 'tcC', type: 'function', function: { name: 'propose_contract', arguments: JSON.stringify(contract) } }] });
+      emit({ type: 'tool.approval_required', id: 'aC', threadId: 'main', createdAt: '', toolCalls: [{ id: 'tcC', sourceEventId: 'm1' }] });
+      return done();
+    }
+    emit({ type: 'model.message', id: `m${turn}`, threadId: 'main', createdAt: '', content: 'Done.' });
+    return done();
+  });
+  let helpRuns = 0;
+  const terminal = { run: async () => (++helpRuns === 1 ? 'exit code: 0\nCommands:\n  routes\n  run' : 'exit code: 0\nCommands:\n  config\n  routes') };
+  const runs = new RunState();
+  const events: UiEvent[] = [];
+  const runner = new AgentRunner(gw, { cancelAll() {} } as any, { forRun: () => [] } as any, runs, log, { ready: async () => CodeIndex.build([]) }, terminal as any);
+  const r = await runner.run('coder', 'x', sinkOf(events));
+  assert.equal(r.status, 'done');
+  assert.equal(calls.inputs[1][0].approval.status, 'allow', 'the user approved the contract');
+  const gate = calls.inputs[2][0];
+  assert.equal(gate.type, 'user.message', 'finishing with a failing clause is withheld');
+  assert.match(gate.content, /finish gate \(1\/2\)/);
+  assert.match(gate.content, /does not match \/config\//);
+  assert.equal(calls.inputs.length, 3, 'second attempt passes the gate');
+  assert.ok(events.some((e) => e.t === 'notice' && /Intent contract satisfied/.test(e.text)));
+  assert.ok(events.some((e) => e.t === 'contract' && e.phase === 'checked'));
+});
+
+test('contract scope: an edit to a file the contract forbids is denied before review', { skip: !have }, async () => {
+  const contract = { clauses: [{ id: 'C9', text: 'do not touch helpers', check: { type: 'not_modified', path_glob: 'src/flask/helpers.py' } }] };
+  let turn = 0;
+  const { gw, calls } = fakeGateway(['m/1'], async (_s, _input, emit) => {
+    turn++;
+    if (turn === 1) {
+      emit({ type: 'model.message', id: 'm1', threadId: 'main', createdAt: '', toolCalls: [{ id: 'tcC', type: 'function', function: { name: 'propose_contract', arguments: JSON.stringify(contract) } }] });
+      emit({ type: 'tool.approval_required', id: 'aC', threadId: 'main', createdAt: '', toolCalls: [{ id: 'tcC', sourceEventId: 'm1' }] });
+      return done();
+    }
+    if (turn === 2) {
+      emit({ type: 'model.message', id: 'm2', threadId: 'main', createdAt: '', toolCalls: [{ id: 'tcE', type: 'function', function: { name: 'edit_file', arguments: JSON.stringify({ path: 'src/flask/helpers.py', old_string: 'def get_debug_flag() -> bool:', new_string: 'def get_debug_flag() -> bool:  # x' }) } }] });
+      emit({ type: 'tool.approval_required', id: 'aE', threadId: 'main', createdAt: '', toolCalls: [{ id: 'tcE', sourceEventId: 'm2' }] });
+      return done();
+    }
+    emit({ type: 'model.message', id: 'm3', threadId: 'main', createdAt: '', content: 'ok' });
+    return done();
+  });
+  let opened = 0;
+  const runner = new AgentRunner(gw, { cancelAll() {}, review: async () => (opened++, {}) } as any, { forRun: () => [] } as any, new RunState(), log);
+  await runner.run('coder', 'x', sinkOf([]));
+  assert.equal(opened, 0, 'no review was opened');
+  assert.equal(calls.inputs[2][0].approval.status, 'deny');
+  assert.match(calls.inputs[2][0].approval.reason, /clause C9/);
+});

@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { Hunk, applyHunks, computeHunks, hunkStartIn, minimalEdit } from './diff';
 import { UndoStack } from './undo';
 import { audit } from '../security/audit';
+import { Dangling, HunkGraph, closureOf, danglingNames, dependentsOf, hunkGraph } from './closure';
 
 export const PROPOSED_SCHEME = 'anvil-proposed';
 export const CURRENT_SCHEME = 'anvil-current';
@@ -14,6 +15,8 @@ export interface ReviewResult {
   /** Text on disk after the review (original + accepted hunks). */
   finalText: string;
   hunks: Hunk[];
+  /** Names the accepted subset references but no longer defines (partial acceptance broke it). */
+  dangling?: Dangling[];
 }
 
 type Decision = 'pending' | 'accepted' | 'rejected';
@@ -25,6 +28,8 @@ class Review {
   done = false;
   /** Security warnings must be confirmed (modal) once before any hunk is applied. */
   warningsConfirmed = false;
+  /** Dependencies between this proposal's hunks (acceptance closure). */
+  graph: HunkGraph = { requires: new Map(), why: new Map() };
   resolve!: (r: ReviewResult) => void;
   readonly promise: Promise<ReviewResult>;
   proposedUri: vscode.Uri;
@@ -87,7 +92,10 @@ class Review {
   }
 
   result(status: ReviewResult['status']): ReviewResult {
+    const acc = this.accepted();
+    const partial = acc.size > 0 && acc.size < this.hunks.length;
     return {
+      dangling: partial ? danglingNames(this.relPath, this.original, this.hunks, acc) : [],
       status,
       accepted: this.hunks.filter((_, i) => this.decisions[i] === 'accepted').map((h) => h.index),
       rejected: this.hunks.filter((_, i) => this.decisions[i] !== 'accepted').map((h) => h.index),
@@ -188,6 +196,10 @@ export class ReviewManager implements vscode.TextDocumentContentProvider, vscode
       const line = Math.min(Math.max(0, hunkStartIn(r.hunks, shown, h)), Math.max(0, doc.lineCount - 1));
       const range = new vscode.Range(line, 0, line, 0);
       const desc = `hunk ${h.index + 1}/${r.hunks.length}: -${h.origLines.length} +${h.newLines.length}`;
+      const needs = [...(r.graph.requires.get(h.index) ?? [])].filter((i) => r.decisions[i] !== 'accepted');
+      if (needs.length) {
+        lenses.push(new vscode.CodeLens(range, { title: `$(link) needs hunk ${needs.map((i) => i + 1).join(', ')}`, tooltip: needs.map((i) => r.graph.why.get(`${h.index}->${i}`)).join('\n'), command: '' }));
+      }
       lenses.push(
         new vscode.CodeLens(range, { title: '$(check) Accept', command: 'anvil.acceptHunk', arguments: [r.id, h.index] }),
         new vscode.CodeLens(range, { title: '$(x) Reject', command: 'anvil.rejectHunk', arguments: [r.id, h.index] }),
@@ -213,6 +225,7 @@ export class ReviewManager implements vscode.TextDocumentContentProvider, vscode
       finish: (finalText: string) => {
         r.streaming = false;
         r.setProposed(finalText);
+        r.graph = hunkGraph(rel, r.original, r.hunks);
         if (!r.hunks.length) {
           this.finalize(r, 'decided');
         } else {
@@ -244,11 +257,57 @@ export class ReviewManager implements vscode.TextDocumentContentProvider, vscode
   private async decide(id: number, idx: number, kind: Decision) {
     const r = this.reviews.get(id);
     if (!r || r.done || r.streaming || r.decisions[idx] !== 'pending') return;
+    const pendingSet = new Set(r.pending().map((h) => h.index));
     if (kind === 'accepted') {
-      const ok = await this.applyAccepted(r, [idx]);
+      // Acceptance closure: hunks this one needs are offered with it and applied atomically.
+      const need = [...closureOf(r.graph, [idx], pendingSet)];
+      let idxs = [idx];
+      if (need.length) {
+        const why = need.map((i) => `• ${r.graph.why.get(`${idx}->${i}`) ?? `needs hunk ${i + 1}`}`).join('\n');
+        const pick = await this.ask(
+          `Hunk ${idx + 1} depends on hunk ${need.map((i) => i + 1).join(', ')}.`,
+          `${why}\n\nAccepting it alone would leave ${r.relPath} in a state nobody proposed.`,
+          ['Accept together', 'Accept only this hunk'],
+        );
+        if (!pick) return;
+        if (pick === 'Accept together') idxs = [idx, ...need];
+        audit.record('review.closure', { path: r.relPath, hunk: idx + 1, needs: need.map((i) => i + 1), choice: pick });
+      }
+      const ok = await this.applyAccepted(r, idxs);
       if (!ok) return;
-    } else r.set('rejected', idx);
+    } else {
+      // Counterfactual: what would the remaining hunks (accepted + still pending) lack without this one?
+      const remaining = new Set([...r.accepted(), ...pendingSet]);
+      remaining.delete(idx);
+      const dependents = [...dependentsOf(r.graph, [idx], remaining)];
+      let rejectAlso: number[] = [];
+      if (dependents.length) {
+        const broken = danglingNames(r.relPath, r.original, r.hunks, remaining);
+        const applied = dependents.filter((i) => r.decisions[i] === 'accepted');
+        const pend = dependents.filter((i) => r.decisions[i] === 'pending');
+        const detail =
+          (broken.length ? `Without it, ${r.relPath} would reference ${broken.map((b) => `${b.name} (line ${b.line})`).join(', ')} with no definition.\n` : '') +
+          dependents.map((i) => `• hunk ${i + 1} ${r.decisions[i] === 'accepted' ? '(already applied) ' : ''}${r.graph.why.get(`${i}->${idx}`) ?? 'depends on it'}`).join('\n');
+        const options = [...(pend.length ? [`Reject with hunk ${pend.map((i) => i + 1).join(', ')}`] : []), ...(applied.length ? ['Accept this hunk instead'] : []), 'Reject only this hunk'];
+        const pick = await this.ask(`Hunk ${dependents.map((i) => i + 1).join(', ')} depend${dependents.length === 1 ? 's' : ''} on hunk ${idx + 1}.`, detail, options);
+        if (!pick) return;
+        audit.record('review.closure', { path: r.relPath, reject: idx + 1, dependents: dependents.map((i) => i + 1), choice: pick });
+        if (pick === 'Accept this hunk instead') {
+          if (await this.applyAccepted(r, [idx])) this.afterDecision(r);
+          return;
+        }
+        if (pick.startsWith('Reject with')) rejectAlso = pend;
+      }
+      r.set('rejected', idx);
+      rejectAlso.forEach((i) => r.set('rejected', i));
+    }
     this.afterDecision(r);
+  }
+
+  /** Modal choice; automation (tests, recorded demos) takes the first option without blocking. */
+  private async ask(message: string, detail: string, options: string[]): Promise<string | undefined> {
+    if (process.env.ANVIL_AUTOMATION) return options[0];
+    return vscode.window.showWarningMessage(`Anvil: ${message}`, { modal: true, detail }, ...options);
   }
 
   private async decideAll(id: number | undefined, kind: Decision) {

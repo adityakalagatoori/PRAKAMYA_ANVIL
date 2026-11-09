@@ -68,3 +68,6 @@ code.cmd { white-space: pre-wrap; word-break: break-all; flex-basis: 100%; }
 .card.admission.held { border-left: 3px solid var(--vscode-editorWarning-foreground, #d29922); }
 .tag.unknown { background: var(--vscode-inputValidation-errorBackground, #5a1d1d); color: var(--vscode-errorForeground, #f85149); }
 .tag.stale, .tag.unread { background: var(--vscode-inputValidation-warningBackground, #352a05); color: var(--vscode-editorWarning-foreground, #d29922); }
+.tag.clause-pass { background: var(--vscode-testing-iconPassed, #3fb950); color: #fff; }
+.tag.clause-fail { background: var(--vscode-testing-iconFailed, #f85149); color: #fff; }
+.tag.clause-pending { opacity: 0.75; }

@@ -7,6 +7,12 @@ import { RunState, canonicalKey } from '../runState';
 import { WRITE_TOOLS, describeReview, prepareWrite, workspaceTrusted } from '../mcp/tools';
 import { CommandRisk, analyzeCommand } from '../security/policy';
 import { audit } from '../security/audit';
+import { describeHit, vault } from '../security/honeytoken';
+import { WorkspaceView, reviewExecution } from '../security/execution';
+import { existsSync, readFileSync } from 'node:fs';
+import * as nodePath from 'node:path';
+import { CommandTerminal, ToolDeps, contractEnv, workspaceRoot } from '../mcp/tools';
+import { contractCard, contractCommands, evaluate, failing, finishGateMessage, forbiddenBy, parseContract } from '../review/contract';
 import { getConfig } from '../config';
 import { CodeIndex } from '../context/index';
 import { AdmissionReport, admissionSummary, assessAdmission, shouldHold } from '../review/grounding';
@@ -37,6 +43,7 @@ export type UiEvent =
   | { t: 'run.start'; runId: string; kind: AgentKind; request: string }
   | { t: 'session'; sessionId: string; url: string; agent: string; model: string; slot: number }
   | { t: 'context'; summary: unknown }
+  | { t: 'contract'; phase: 'proposed' | 'approved' | 'live' | 'checked'; clauses: ReturnType<typeof contractCard> }
   | { t: 'admission'; id: string; path: string; held: boolean; report: ReturnType<typeof admissionCard> }
   | { t: 'delta'; threadId: string; text: string }
   | { t: 'reasoning'; threadId: string; text: string }
@@ -94,7 +101,13 @@ export class AgentRunner {
     private log: vscode.OutputChannel,
     /** Code index for the admission check (optional: without it the check is skipped). */
     private index?: { ready(): Promise<CodeIndex> },
+    /** Terminal used to run the approved intent-contract checks at the finish gate. */
+    private terminal?: CommandTerminal,
   ) {}
+
+  private contractDeps(): ToolDeps {
+    return { index: this.index as any, runs: this.runs, terminal: this.terminal as any, reviews: this.reviews, log: this.log };
+  }
 
   get isRunning() {
     return !!this.current;
@@ -342,6 +355,25 @@ export class AgentRunner {
           input = [{ type: 'user.message', content: CONTINUE_NUDGE }];
           continue;
         }
+        // ---- Finish gate: the run cannot end while the approved intent contract fails ----
+        const contract = this.runs.contract;
+        if (contract && this.terminal && this.index) {
+          const env = contractEnv(this.contractDeps());
+          await env.ready();
+          sink.emit({ t: 'notice', level: 'info', text: 'Finish gate: checking the intent contract…' });
+          await evaluate(contract, env, { commands: true });
+          if (signal.aborted) return { status: 'cancelled', output };
+          sink.emit({ t: 'contract', phase: 'checked', clauses: contractCard(contract) });
+          const bad = failing(contract);
+          audit.record('contract.gate', { round: this.runs.gateRounds + 1, failing: bad.map((c) => c.id) });
+          if (bad.length && this.runs.gateRounds < 2) {
+            this.runs.gateRounds++;
+            sink.emit({ t: 'notice', level: 'warn', text: `Finish gate: ${bad.length} contract clause(s) not satisfied (${bad.map((c) => c.id).join(', ')}) — sending the agent back with the evidence (${this.runs.gateRounds}/2).` });
+            input = [{ type: 'user.message', content: finishGateMessage(contract, this.runs.gateRounds) }];
+            continue;
+          }
+          sink.emit({ t: 'notice', level: bad.length ? 'error' : 'info', text: bad.length ? `Intent contract NOT satisfied: ${bad.map((c) => `${c.id} ${c.text}`).join('; ')}` : `Intent contract satisfied: all ${contract.clauses.length} clauses pass.` });
+        }
         return { status: 'done', output };
       }
 
@@ -366,8 +398,38 @@ export class AgentRunner {
   private async decide(info: ToolCallInfo | undefined, id: string, sink: RunSink, signal: AbortSignal): Promise<TrueForge.ApprovalDecision> {
     const runId = this.runs.active?.id ?? 'none';
     if (!info) return { status: 'allow' };
+    if (info.name === 'propose_contract') {
+      const parsed = parseContract(info.args);
+      if (!parsed.contract) {
+        sink.emit({ t: 'approval.resolved', id, allowed: false, summary: `Invalid contract: ${parsed.error}` });
+        return { status: 'deny', reason: `Invalid contract: ${parsed.error}. Fix the clauses and call propose_contract again.` };
+      }
+      const c = parsed.contract;
+      const cmds = contractCommands(c);
+      const risks = cmds.map((x) => analyzeCommand(x));
+      const order = { low: 0, medium: 1, high: 2 } as const;
+      const risk: CommandRisk = {
+        risk: risks.reduce<CommandRisk['risk']>((m, r) => (order[r.risk] > order[m] ? r.risk : m), 'low'),
+        reasons: [...c.clauses.map((x) => `${x.id}: ${x.text}`), ...risks.flatMap((r, i) => r.reasons.map((why) => `\`${cmds[i]}\`: ${why}`))],
+      };
+      sink.emit({ t: 'contract', phase: 'proposed', clauses: contractCard(c) });
+      const ok = await this.raceAbort(sink.approveCommand(id, `Intent contract — ${c.clauses.length} clauses${cmds.length ? `; checks will run: ${cmds.join(' · ')}` : ''}`, risk), signal, false);
+      audit.record('contract.decision', { allowed: ok, clauses: c.clauses.map((x) => ({ id: x.id, type: x.check.type })) });
+      sink.emit({ t: 'approval.resolved', id, allowed: ok, summary: ok ? `Contract approved (${c.clauses.length} clauses)` : 'Contract declined' });
+      if (!ok) return { status: 'deny', reason: 'The user declined this contract. Ask what they expect, or propose a corrected contract.' };
+      this.runs.contract = c;
+      sink.emit({ t: 'contract', phase: 'approved', clauses: contractCard(c) });
+      return { status: 'allow' };
+    }
     if (WRITE_TOOLS.has(info.name)) {
       const prepared = await prepareWrite(info.name, info.args);
+      // Negative-scope clauses of the approved contract are enforced before the user sees anything.
+      const forbid = 'error' in prepared ? undefined : forbiddenBy(this.runs.contract, prepared.rel);
+      if (forbid) {
+        audit.record('contract.forbidden_write', { path: (prepared as any).rel, clause: forbid.id });
+        sink.emit({ t: 'approval.resolved', id, allowed: false, summary: `Blocked by contract ${forbid.id}: ${forbid.text}` });
+        return { status: 'deny', reason: `The approved intent contract forbids this edit: clause ${forbid.id} "${forbid.text}". Achieve the goal without modifying ${(prepared as any).rel}.` };
+      }
       if ('error' in prepared) {
         audit.record('approval.auto_deny', { tool: info.name, reason: prepared.error });
         sink.emit({ t: 'approval.resolved', id, allowed: false, summary: prepared.error });
@@ -406,6 +468,22 @@ export class AgentRunner {
       const review = await this.reviews.review(prepared.uri, prepared.original, prepared.proposed, { runId, title: `${info.name} ${prepared.rel}`, isNewFile: prepared.isNewFile, warnings: prepared.warnings, notes });
       // The model knows what it wrote: accepted content counts as observed.
       if (review.accepted.length) {
+        const acc = new Set(review.accepted);
+        const added = (review.hunks ?? []).filter((h) => acc.has(h.index)).flatMap((h) => h.newLines).join('\n');
+        this.runs.recordAgentWrite(prepared.rel, added || String(info.args?.new_string ?? info.args?.content ?? ''));
+        // Traceability + live contract status (file/symbol/scope clauses; commands run at the finish gate).
+        const c = this.runs.contract;
+        if (c) {
+          for (const cid of Array.isArray(info.args?.clauses) ? info.args.clauses : []) {
+            if (c.results.has(String(cid))) c.servedBy.set(String(cid), [...(c.servedBy.get(String(cid)) ?? []), prepared.rel]);
+          }
+          if (this.index && this.terminal) {
+            const env = contractEnv(this.contractDeps());
+            await env.ready();
+            await evaluate(c, env, { commands: false });
+            sink.emit({ t: 'contract', phase: 'live', clauses: contractCard(c) });
+          }
+        }
         const written = info.name === 'create_file' ? String(info.args?.content ?? '') : String(info.args?.new_string ?? '');
         this.runs.ledger.record(prepared.rel, 1, written, 'own_edit');
       }
@@ -420,11 +498,37 @@ export class AgentRunner {
     if (info.name === 'run_command') {
       const cmd = String(info.args?.command ?? '');
       if (!workspaceTrusted()) return { status: 'deny', reason: 'Workspace is not trusted; commands are disabled.' };
+      // Honeytoken tripwire: the model only ever saw decoys, so a decoy in a command is an
+      // exfiltration attempt by construction (prompt injection or a confused agent).
+      const leaks = vault.scan(cmd);
+      if (leaks.length) {
+        const what = leaks.map(describeHit).join(', ');
+        audit.record('exfil.blocked', { sink: 'run_command', command: cmd, labels: leaks.map((l) => l.entry.label), encodings: leaks.map((l) => l.encoding) });
+        sink.emit({ t: 'notice', level: 'error', text: `Blocked a command that tried to send a ${what} out of the machine. The model only ever saw a decoy (honeytoken), so this is an exfiltration attempt — check recent context for injected instructions.` });
+        sink.emit({ t: 'approval.resolved', id, allowed: false, summary: `Blocked: carries a ${what}` });
+        return { status: 'deny', reason: `Blocked by Anvil: this command contains a credential (${what}). Credentials must never be sent anywhere by the agent. Do not retry; continue the task without it.` };
+      }
       const risk = analyzeCommand(cmd);
+      // Edit-to-execution binding: which agent-modified files will this command actually run?
+      let binding: Record<string, string> | undefined;
+      if (this.runs.agentWrites.size && this.index) {
+        try {
+          const ex = reviewExecution(cmd, this.workspaceView(await this.index.ready()), this.runs.agentWrites);
+          if (ex.modified.length) {
+            binding = ex.binding;
+            const order = { low: 0, medium: 1, high: 2, none: 0 } as const;
+            if (order[ex.risk] > order[risk.risk]) risk.risk = ex.risk as CommandRisk['risk'];
+            risk.reasons.unshift(...ex.reasons);
+            audit.record('execution.bound', { command: cmd, files: ex.modified.map((m) => m.path), risk: ex.risk, effects: ex.modified.flatMap((m) => m.effects.map((e) => e.kind)) });
+          }
+        } catch (e) {
+          this.log.appendLine(`[execution] skipped: ${(e as Error).message}`);
+        }
+      }
       sink.emit({ t: 'approval', id, name: info.name, summary: `Run: ${cmd}`, risk });
       const ok = await this.raceAbort(sink.approveCommand(id, cmd, risk), signal, false);
       audit.record('approval', { tool: 'run_command', command: cmd, risk: risk.risk, reasons: risk.reasons, allowed: ok });
-      if (ok) this.runs.approveCommand(cmd);
+      if (ok) this.runs.approveCommand(cmd, binding);
       sink.emit({ t: 'approval.resolved', id, allowed: ok, summary: ok ? `Approved: ${cmd}` : `Denied: ${cmd}` });
       return ok ? { status: 'allow' } : { status: 'deny', reason: 'The user declined to run this command.' };
     }
@@ -475,6 +579,21 @@ export class AgentRunner {
     }
     add('\nNow re-check your edit against this code. If it is still correct, re-issue the SAME edit_file/create_file call unchanged; otherwise issue a corrected one. The user has not seen this edit yet.');
     return out.join('\n');
+  }
+
+  /** Workspace as it is on disk now (index file list + agent-written files + build files the index skips). */
+  private workspaceView(idx: CodeIndex): WorkspaceView {
+    const root = workspaceRoot()?.fsPath ?? '';
+    const read = (p: string) => {
+      try {
+        return readFileSync(nodePath.join(root, p), 'utf8');
+      } catch {
+        return undefined;
+      }
+    };
+    const files = new Set([...idx.files.keys(), ...this.runs.agentWrites.keys()]);
+    for (const extra of ['Makefile', 'makefile', 'GNUmakefile', '.envrc', 'package.json', 'pyproject.toml', 'setup.cfg', 'tox.ini', 'pytest.ini']) if (root && existsSync(nodePath.join(root, extra))) files.add(extra);
+    return { files: () => [...files], read };
   }
 
   private raceAbort<T>(p: Promise<T>, signal: AbortSignal, onAbort: T): Promise<T> {

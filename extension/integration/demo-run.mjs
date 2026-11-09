@@ -12,6 +12,7 @@ const flask = resolve(process.argv[2] ?? join(ext, '..', '..', 'flask-3.1.3'));
 await build({ entryPoints: [join(ext, 'integration', 'demo.ts')], bundle: true, platform: 'node', format: 'cjs', outfile: join(ext, 'out-test', 'demo.cjs'), external: ['vscode'] });
 
 delete process.env.ELECTRON_RUN_AS_NODE;
+process.env.ANVIL_AUTOMATION ??= "1"; // review prompts (acceptance closure) pick their first option instead of blocking
 const tmp = mkdtempSync(join(tmpdir(), 'anvil-demo-'));
 const ws = join(tmp, 'flask');
 cpSync(flask, ws, { recursive: true, filter: (s) => !/[\\/](\.venv|__pycache__)([\\/]|$)/.test(s) });

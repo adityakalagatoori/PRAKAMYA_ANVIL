@@ -141,15 +141,49 @@
     scroll();
   }
 
+  /** The intent contract: one card per run, updated in place as clauses are checked. */
+  let contractEl = null;
+  function renderContract(e) {
+    const label = { proposed: 'proposed — waiting for your approval', approved: 'approved', live: 'live', checked: 'finish gate' };
+    const pass = e.clauses.filter((c) => c.state === 'pass').length;
+    if (!contractEl || e.phase === 'proposed') {
+      contractEl = card('Intent contract', '', 'contract', false);
+      container('main').append(contractEl);
+    }
+    const c = contractEl;
+    c._sub.textContent = `${pass}/${e.clauses.length} clauses pass · ${label[e.phase] || e.phase}`;
+    const anyFail = e.clauses.some((x) => x.required && x.state === 'fail');
+    c._dot.className = 'dot ' + (e.phase === 'proposed' ? 'wait' : pass === e.clauses.length ? 'ok' : anyFail && e.phase === 'checked' ? 'err' : 'run');
+    const b = c._body;
+    b.textContent = '';
+    b.style.fontFamily = 'var(--vscode-font-family)';
+    b.append(el('div', 'muted', 'What "done" means for this request, as checks Anvil runs itself. The agent cannot finish while a required clause fails.'));
+    const table = el('table', 'ctx-table');
+    for (const x of e.clauses) {
+      const tr = el('tr');
+      const st = el('td', 'path');
+      st.append(el('span', 'tag clause-' + x.state, x.state === 'pass' ? '✓ pass' : x.state === 'fail' ? '✗ fail' : '… pending'), el('span', '', ` ${x.id}${x.required ? '' : ' (optional)'}`));
+      const why = el('td', 'why', x.text + (x.detail ? ` — ${x.detail.split('\n')[0]}` : '') + (x.servedBy.length ? ` · served by ${[...new Set(x.servedBy)].join(', ')}` : ''));
+      tr.append(st, why, el('td', 'tok', x.type.replace('_', ' ')));
+      table.append(tr);
+    }
+    b.append(table);
+    scroll();
+  }
+
   function onUi(e) {
     clearEmpty();
     switch (e.t) {
+      case 'contract':
+        renderContract(e);
+        break;
       case 'admission':
         renderAdmission(e);
         break;
       case 'run.start':
         setRunning(true, e.kind === 'inline' ? 'inline edit' : 'running');
         currentAssistant = {};
+        contractEl = null;
         break;
       case 'session': {
         $('model').textContent = `${e.model}${e.slot ? ' (fallback #' + e.slot + ')' : ''} · ${e.agent}`;
