@@ -54,7 +54,7 @@ def make_edl(tour):
 
     # 2 — Install: README setup ------------------------------------------------------------------
     a = t["readme"]
-    L = lambda n, c=1: line_rect(21, 242, n, count=c, w=900)
+    L = lambda n, c=1: line_rect(21, 242, n, count=c, w=700)
     segs.append(dict(
         id="install", clip="tour.mp4", src=(a, a + 16.5),
         text="Getting started takes four steps, all in the README. Start TrueForge locally. Register a model provider, with your keys kept in environment variables. Build the extension. Then open your project, and press F5.",
