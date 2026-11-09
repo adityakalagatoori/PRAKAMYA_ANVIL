@@ -199,9 +199,13 @@ export interface CommandRisk {
 
 const HIGH: [RegExp, string][] = [
   [/\brm\s+(-[a-z]*r[a-z]*f|-[a-z]*f[a-z]*r|--recursive|--force)\b|\brm\s+-[a-z]*r\b/i, 'recursive/forced delete'],
-  [/\b(rmdir|rd)\s+\/s\b|\bdel\s+\/[sfq]|\bRemove-Item\b[^|;]*-Recurse|\bformat\s+[a-z]:|\bmkfs\b|\bdd\s+if=/i, 'recursive delete / disk operation'],
+  [/\b(rmdir|rd)\b[^|;&]*\/s\b|\b(del|erase)\b[^|;&]*\/[sfq]\b|\bformat\s+[a-z]:|\bmkfs\b|\bdd\s+if=/i, 'recursive delete / disk operation'],
+  // PowerShell Remove-Item and its aliases (ri, rm, del, erase, rd, rmdir) with -Recurse or any unambiguous prefix (-r, -rec…)
+  [/\b(Remove-Item|ri|rm|del|erase|rd|rmdir)\b[^|;&]*\s-r(e(c(u(r(s(e)?)?)?)?)?)?\b/i, 'recursive delete (PowerShell)'],
   [/\bgit\s+(reset\s+--hard|clean\s+-[a-z]*[fdx]|push\s+(-f|--force)|checkout\s+--\s+\.|restore\s+(--source|-s)?\s*\.|stash\s+drop|branch\s+-D|filter-branch|reflog\s+expire)\b/i, 'destroys git history or uncommitted work'],
   [/\b(curl|wget|iwr|Invoke-WebRequest|Invoke-RestMethod|irm)\b[^|]*\|\s*(ba|z|)sh\b|\|\s*(iex|Invoke-Expression)\b|\bbash\s+<\(\s*curl/i, 'downloads and executes remote code'],
+  [/\b(iex|Invoke-Expression)\b[^;]*\b(irm|iwr|Invoke-WebRequest|Invoke-RestMethod|curl|wget|DownloadString|Net\.WebClient)\b|\b(irm|iwr|Invoke-WebRequest|Invoke-RestMethod|DownloadString)\b[^;]*\b(iex|Invoke-Expression)\b/i, 'downloads and executes remote code'],
+  [/\bgit\b[^|;&]*\s-c\s+["']?(core\.(hooksPath|sshCommand|pager|editor|fsmonitor)|alias\.|protocol\.|credential\.helper)|\bgit\s+config\b[^|;&]*\b(core\.hooksPath|core\.fsmonitor|core\.sshCommand|alias\.)/i, 'overrides git config to run arbitrary code'],
   [/\b(nc|ncat|netcat|socat|telnet)\b|\/dev\/tcp\//i, 'raw network connection'],
   [/\b(base64\s+(-d|--decode)|FromBase64String|certutil\s+-decode)\b/i, 'decodes obfuscated payload'],
   [/\b(chmod\s+(-R\s+)?777|chown\s+-R|icacls\b.*\/grant|takeown\b)/i, 'broad permission change'],
