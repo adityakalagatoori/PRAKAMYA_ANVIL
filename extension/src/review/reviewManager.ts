@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { Hunk, applyHunks, computeHunks, hunkStartIn, minimalEdit } from './diff';
 import { UndoStack } from './undo';
+import { audit } from '../security/audit';
 
 export const PROPOSED_SCHEME = 'anvil-proposed';
 export const CURRENT_SCHEME = 'anvil-current';
@@ -22,6 +23,8 @@ class Review {
   decisions: Decision[] = [];
   streaming = true;
   done = false;
+  /** Security warnings must be confirmed (modal) once before any hunk is applied. */
+  warningsConfirmed = false;
   resolve!: (r: ReviewResult) => void;
   readonly promise: Promise<ReviewResult>;
   proposedUri: vscode.Uri;
@@ -36,6 +39,7 @@ class Review {
     readonly isNewFile: boolean,
     readonly runId: string,
     readonly title: string,
+    readonly warnings: string[] = [],
   ) {
     this._proposed = original;
     this.proposedUri = vscode.Uri.from({ scheme: PROPOSED_SCHEME, path: '/' + relPath, query: `id=${id}` });
@@ -171,6 +175,7 @@ export class ReviewManager implements vscode.TextDocumentContentProvider, vscode
     const pending = r.pending();
     if (!pending.length) return [];
     const lenses: vscode.CodeLens[] = [
+      ...r.warnings.map((w) => new vscode.CodeLens(top, { title: `$(warning) ${w}`, command: '' })),
       new vscode.CodeLens(top, { title: `$(check-all) Accept all ${pending.length} pending`, command: 'anvil.acceptAll', arguments: [r.id] }),
       new vscode.CodeLens(top, { title: '$(close-all) Reject all', command: 'anvil.rejectAll', arguments: [r.id] }),
       new vscode.CodeLens(top, { title: `${r.title} — ${r.hunks.length - pending.length}/${r.hunks.length} decided · Ctrl+Alt+Y / N per hunk`, command: '' }),
@@ -190,9 +195,9 @@ export class ReviewManager implements vscode.TextDocumentContentProvider, vscode
   }
 
   /** Opens a diff that live-updates while the model streams. Call finish() to switch to review. */
-  async openStreaming(target: vscode.Uri, original: string, opts: { runId: string; title: string; isNewFile?: boolean }) {
+  async openStreaming(target: vscode.Uri, original: string, opts: { runId: string; title: string; isNewFile?: boolean; warnings?: string[] }) {
     const rel = this.rel(target);
-    const r = new Review(this.nextId++, target, rel, original, !!opts.isNewFile, opts.runId, opts.title);
+    const r = new Review(this.nextId++, target, rel, original, !!opts.isNewFile, opts.runId, opts.title, opts.warnings ?? []);
     this.reviews.set(r.id, r);
     await diffOpen(r);
     return {
@@ -219,7 +224,7 @@ export class ReviewManager implements vscode.TextDocumentContentProvider, vscode
   }
 
   /** Full review of a finished proposal (agent mode). Resolves once every hunk is decided. */
-  async review(target: vscode.Uri, original: string, proposed: string, opts: { runId: string; title: string; isNewFile?: boolean }): Promise<ReviewResult> {
+  async review(target: vscode.Uri, original: string, proposed: string, opts: { runId: string; title: string; isNewFile?: boolean; warnings?: string[] }): Promise<ReviewResult> {
     const s = await this.openStreaming(target, original, opts);
     return s.finish(proposed);
   }
@@ -255,6 +260,19 @@ export class ReviewManager implements vscode.TextDocumentContentProvider, vscode
 
   /** Applies hunks to the real file as one atomic, undoable WorkspaceEdit, then saves. */
   private async applyAccepted(r: Review, idxs: number[]): Promise<boolean> {
+    if (r.warnings.length && !r.warningsConfirmed) {
+      const pick = await vscode.window.showWarningMessage(
+        `Anvil: this change to ${r.relPath} needs extra care`,
+        { modal: true, detail: r.warnings.map((w) => '• ' + w).join('\n') + '\n\nOnly apply it if you expected the agent to change this.' },
+        'Apply anyway',
+      );
+      if (pick !== 'Apply anyway') {
+        audit.record('review.warning_declined', { path: r.relPath, warnings: r.warnings });
+        return false;
+      }
+      r.warningsConfirmed = true;
+      audit.record('review.warning_confirmed', { path: r.relPath, warnings: r.warnings });
+    }
     const before = r.currentText();
     const doc = r.isNewFile && !(await exists(r.target)) ? undefined : await vscode.workspace.openTextDocument(r.target);
     if (doc && normalize(doc.getText()) !== normalize(before)) {
@@ -279,6 +297,7 @@ export class ReviewManager implements vscode.TextDocumentContentProvider, vscode
     }
     const saved = await vscode.workspace.openTextDocument(r.target);
     await saved.save();
+    audit.record('write.applied', { path: r.relPath, runId: r.runId, hunks: idxs.map((i) => i + 1), created: r.isNewFile && !doc, bytes: after.length });
     this.undo.push({ uri: r.target, relPath: r.relPath, before: r.isNewFile && !doc ? null : before, after, runId: r.runId, label: `${r.title} (${idxs.length} hunk${idxs.length > 1 ? 's' : ''})` });
     return true;
   }
@@ -291,6 +310,7 @@ export class ReviewManager implements vscode.TextDocumentContentProvider, vscode
   private finalize(r: Review, status: ReviewResult['status']) {
     if (r.done) return;
     r.done = true;
+    audit.record('review.done', { path: r.relPath, runId: r.runId, status, decisions: r.decisions });
     if (status === 'cancelled') {
       // Anything not yet accepted is dropped.
       r.decisions = r.decisions.map((d) => (d === 'pending' ? 'rejected' : d));

@@ -11,6 +11,8 @@ Anvil is a Visual Studio Code extension whose agent loop runs on [TrueForge](htt
 | **Streaming and cancellation** | Tokens stream from TrueForge events. Stop, `Esc` in the panel, or `Ctrl+Alt+Backspace` cancels the TrueForge session, kills running commands and discards pending hunks. |
 | **Resilience** | Transient errors are retried with backoff. Anvil then fails over automatically to the next configured model. If every model fails, you get a clear message and the workspace is untouched. |
 
+**Security:** Anvil is hardened against the vulnerability classes that hit Copilot, Cursor, Cline, Roo Code and Amazon Q (config-file RCE, exfiltration channels, secret leakage, hidden-Unicode backdoors, localhost-server CSRF and DNS rebinding, destructive commands, loops, path traversal, ReDoS, terminal escapes, supply chain). See **[SECURITY.md](SECURITY.md)** for the threat model, the control for each class, and the test that proves it.
+
 **Starting point:** from scratch. There is no upstream fork; all code in this repository is original. Libraries: `@truefoundry/trueforge-sdk`, `@modelcontextprotocol/sdk`, `diff`, `zod`.
 
 ---
@@ -98,7 +100,7 @@ Design details, trade-offs and the build plan: [PLAN.md](PLAN.md) and [WRITEUP.m
 
 ```bash
 cd extension
-npm test                  # unit (19): retrieval on flask, hunks, MCP transport, runner (approval→review, live delta shape, fallback, backoff, cancel, nudges)
+npm test                  # unit (32): security policy + attack simulations over HTTP, retrieval on flask, hunks, MCP transport, runner (approval→review, live delta shape, fallback, backoff, cancel, nudges)
 npm run test:integration  # real VS Code (isolated download): diff editor + CodeLens, accept one/reject one hunk, disk state, undo, cancel, new file + revert, panel
 ANVIL_LIVE_MODEL=ollama/qwen25-7b ANVIL_VENV_PY=<flask>/.venv/Scripts/python.exe npm run test:integration   # + LIVE Task A and Task C
 STUB_WORKSPACE=<flask copy> ANVIL_MODELS=ollama/qwen3-4b ANVIL_TASK=A|B npm run e2e   # live: real TrueForge + real model, headless
@@ -106,7 +108,7 @@ STUB_WORKSPACE=<flask copy> ANVIL_MODELS=ollama/qwen3-4b ANVIL_TASK=A|B npm run 
 
 | Layer | What it proves |
 |---|---|
-| Unit (19) | The Task B instruction retrieves `cli.py`, `test_cli.py` and `docs/cli.rst` within budget. An auth error goes straight to the fallback model. A transient error is retried after 1 s and 3 s. Cancellation stops the run and cancels the TrueForge session. `old_string` not found produces an automatic deny with a reason. |
+| Unit (32) | The Task B instruction retrieves `cli.py`, `test_cli.py` and `docs/cli.rst` within budget. An auth error goes straight to the fallback model. A transient error is retried after 1 s and 3 s. Cancellation stops the run and cancels the TrueForge session. `old_string` not found produces an automatic deny with a reason. |
 | Integration (10, inside VS Code) | Per-hunk CodeLens appears in the diff editor. An accepted hunk lands on disk and a rejected one does not. `Anvil: Undo` restores the file. Cancelling a review writes nothing. **Live Task A:** inline edit, then a streamed diff, then accept, and `FLASK_DEBUG=off` prints `False`. **Live Task C:** an unreachable primary (`ECONNREFUSED`) is retried with backoff and then falls back automatically, and the edit lands; with no fallback, a clear error appears in 4 s and the file is untouched. |
 | Live e2e (headless) | TrueForge connects to `anvil-editor` over streamable HTTP on localhost. Tool calls are rebuilt from streamed deltas. `retrieve_context`, `list_files`, `read_file` and a **dynamic sub-agent** (`explorer`) run against a real model. |
 

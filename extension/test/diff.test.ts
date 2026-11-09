@@ -41,3 +41,16 @@ test('search/replace: exact, ambiguous, missing, whitespace-tolerant, CRLF', () 
   assert.deepEqual(applySearchReplace('def f():   \n    pass\n', 'def f():\n    pass', 'def g():\n    pass'), { ok: true, result: 'def g():\n    pass\n' });
   assert.deepEqual(applySearchReplace('a\r\nb\r\n', 'a\nb', 'a\nc'), { ok: true, result: 'a\r\nc\r\n' });
 });
+
+test('search/replace miss returns the closest region with line numbers (diff-edit-failed loops)', async () => {
+  const { applySearchReplace } = await import('../src/review/diff');
+  const file = 'import os\n\ndef get_debug_flag() -> bool:\n    val = os.environ.get("FLASK_DEBUG")\n    return bool(val and val.lower() not in {"0", "false", "no"})\n';
+  const r = applySearchReplace(file, 'def get_debug_flag():\n    val = os.environ.get("FLASK_DEBUG")', 'x');
+  assert.equal(r.ok, false);
+  if (!r.ok) {
+    assert.match(r.error, /closest region is lines 2-/);
+    assert.match(r.error, /\s3\| def get_debug_flag\(\) -> bool:/);
+  }
+  const multi = applySearchReplace('a\nb\na\nb\n', 'a\nb', 'z');
+  assert.ok(!multi.ok && /matches 2 locations \(lines 1, 3\)/.test(multi.error));
+});

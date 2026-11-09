@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { CodeIndex } from './index';
+import { isSecretPath } from '../security/policy';
 
 const INCLUDE = '**/*.{py,pyi,rst,md,txt,toml,cfg,ini,json,yaml,yml,js,jsx,ts,tsx,mjs,cjs,go,rs,java,kt,rb,php,c,h,cc,cpp,hpp,cs,swift,sh,html,css,scss,sql}';
 const EXCLUDE = '**/{.git,node_modules,.venv,venv,env,.tox,.nox,__pycache__,dist,build,out,.mypy_cache,.pytest_cache,.ruff_cache,site-packages,.idea,.vscode-test,coverage,htmlcov}/**';
@@ -40,6 +41,8 @@ export class WorkspaceIndex implements vscode.Disposable {
     await Promise.all(
       uris.map(async (u) => {
         try {
+          // Credential files are never indexed, so they cannot leak through retrieval or search.
+          if (isSecretPath(vscode.workspace.asRelativePath(u, false))) return;
           const stat = await vscode.workspace.fs.stat(u);
           if (stat.size > MAX_BYTES) return;
           const bytes = await vscode.workspace.fs.readFile(u);
@@ -70,6 +73,7 @@ export class WorkspaceIndex implements vscode.Disposable {
     for (const [s, kind] of batch) {
       const uri = vscode.Uri.parse(s);
       const rel = vscode.workspace.asRelativePath(uri, false).replace(/\\/g, '/');
+      if (isSecretPath(rel)) continue;
       if (kind === 'delete') idx = idx.withFile(rel, undefined);
       else {
         try {

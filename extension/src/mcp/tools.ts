@@ -1,8 +1,10 @@
 import * as vscode from 'vscode';
 import { spawn, ChildProcess } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import * as path from 'node:path';
 import { z } from 'zod';
+import { badSegment, classifyPath, editWarnings, isSecretPath, safeRegex, sanitizeTerminal, scrubEnv } from '../security/policy';
+import { audit } from '../security/audit';
 import { WorkspaceIndex } from '../context/workspaceIndex';
 import { assembleContext, buildRepoMap, renderPack, summarizePack } from '../context/assembler';
 import { applySearchReplace } from '../review/diff';
@@ -16,6 +18,8 @@ export interface ToolDeps {
   runs: RunState;
   log: vscode.OutputChannel;
   terminal: CommandTerminal;
+  /** Fallback approval when a command arrives without a TrueForge approval (never auto-runs). */
+  confirmCommand?: (command: string) => Promise<boolean>;
 }
 
 export interface ToolDef {
@@ -38,15 +42,50 @@ export function resolvePath(p: string): { uri: vscode.Uri; rel: string } {
   if (!root) throw new Error('No workspace folder is open.');
   const clean = String(p ?? '').replace(/\\/g, '/').replace(/^\.\//, '').replace(/^\/+/, '');
   const parts: string[] = [];
+  if (/^[a-z]:/i.test(clean) || String(p ?? '').startsWith('\\\\')) throw new Error(`Absolute paths are not allowed: ${p}`);
   for (const seg of clean.split('/')) {
     if (!seg || seg === '.') continue;
     if (seg === '..') {
       if (!parts.length) throw new Error(`Path escapes the workspace: ${p}`);
       parts.pop();
-    } else parts.push(seg);
+      continue;
+    }
+    const bad = badSegment(seg);
+    if (bad) throw new Error(`Rejected path "${p}": ${bad}`);
+    parts.push(seg);
   }
   if (!parts.length) throw new Error('Empty path.');
-  return { uri: vscode.Uri.joinPath(root, ...parts), rel: parts.join('/') };
+  const uri = vscode.Uri.joinPath(root, ...parts);
+  assertRealInside(root.fsPath, uri.fsPath, p);
+  return { uri, rel: parts.join('/') };
+}
+
+/** Symlink/junction containment: the real path of the target (or its nearest existing parent) must stay in the workspace. */
+function assertRealInside(rootFs: string, targetFs: string, original: string) {
+  let realRoot: string;
+  try {
+    realRoot = realpathSync.native(rootFs);
+  } catch {
+    return;
+  }
+  let probe = targetFs;
+  while (!existsSync(probe)) {
+    const parent = path.dirname(probe);
+    if (parent === probe) return;
+    probe = parent;
+  }
+  let real: string;
+  try {
+    real = realpathSync.native(probe);
+  } catch {
+    return;
+  }
+  const rel = path.relative(realRoot.toLowerCase(), real.toLowerCase());
+  if (rel.startsWith('..') || path.isAbsolute(rel)) throw new Error(`Path escapes the workspace through a symlink: ${original}`);
+}
+
+export function workspaceTrusted(): boolean {
+  return (vscode.workspace as any).isTrusted !== false;
 }
 
 export async function readText(uri: vscode.Uri): Promise<string | undefined> {
@@ -66,23 +105,29 @@ export interface PreparedWrite {
   original: string;
   proposed: string;
   isNewFile: boolean;
+  /** Security warnings; non-empty means the user must explicitly confirm before anything is applied. */
+  warnings: string[];
 }
 
 /** Turns a write tool call into (original, proposed) without touching disk. */
 export async function prepareWrite(tool: string, args: any): Promise<PreparedWrite | { error: string }> {
   try {
+    if (!workspaceTrusted()) return { error: 'This workspace is not trusted (Restricted Mode). Anvil does not write files in untrusted workspaces.' };
     const { uri, rel } = resolvePath(args?.path);
+    const cls = classifyPath(rel);
+    if (cls.level === 'blocked') return { error: `${rel} is protected: ${cls.reason}.` };
     const current = await readText(uri);
     if (tool === 'create_file') {
       if (current !== undefined) return { error: `${rel} already exists. Use edit_file to change it.` };
-      return { tool, uri, rel, original: '', proposed: String(args?.content ?? ''), isNewFile: true };
+      const proposed = String(args?.content ?? '');
+      return { tool, uri, rel, original: '', proposed, isNewFile: true, warnings: editWarnings(rel, '', proposed) };
     }
     if (tool === 'edit_file') {
       if (current === undefined) return { error: `${rel} does not exist. Use create_file for new files.` };
       const r = applySearchReplace(current, String(args?.old_string ?? ''), String(args?.new_string ?? ''));
       if (!r.ok) return { error: `${rel}: ${r.error}` };
       if (r.result === current) return { error: `${rel}: old_string and new_string are identical; nothing to change.` };
-      return { tool, uri, rel, original: current, proposed: r.result, isNewFile: false };
+      return { tool, uri, rel, original: current, proposed: r.result, isNewFile: false, warnings: editWarnings(rel, current, r.result) };
     }
     return { error: `Unknown write tool ${tool}` };
   } catch (e) {
@@ -129,28 +174,35 @@ export const TOOLS: ToolDef[] = [
     },
     async run(a, d) {
       const idx = await d.index.ready();
-      let re: RegExp;
-      try {
-        re = a.is_regex ? new RegExp(a.pattern, 'i') : new RegExp(a.pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
-      } catch (e) {
-        return `Invalid regex: ${(e as Error).message}`;
-      }
+      // Model-supplied regexes run in the extension host: guard against ReDoS (pattern shape,
+      // line length cap, overall time budget).
+      const compiled = safeRegex(String(a.pattern ?? ''), !!a.is_regex);
+      if ('error' in compiled) return compiled.error;
+      const re = compiled.re;
       const glob = a.path_glob ? globToRe(a.path_glob) : undefined;
       const max = a.max_results ?? 60;
       const out: string[] = [];
       let total = 0;
+      const deadline = Date.now() + 3000;
+      let truncated = false;
       for (const f of idx.files.values()) {
         if (glob && !glob.test(f.path)) continue;
+        if (Date.now() > deadline) {
+          truncated = true;
+          break;
+        }
         const lines = f.text.split(/\r?\n/);
         for (let i = 0; i < lines.length; i++) {
+          if (lines[i].length > 2000) continue; // minified/generated lines: skip
           if (re.test(lines[i])) {
             total++;
             if (out.length < max) out.push(`${f.path}:${i + 1}: ${lines[i].trim().slice(0, 200)}`);
           }
         }
       }
-      if (!out.length) return 'No matches.';
-      return out.join('\n') + (total > out.length ? `\n… ${total - out.length} more matches (narrow with path_glob)` : '');
+      const note = truncated ? '\n[search stopped after 3s; narrow it with path_glob]' : '';
+      if (!out.length) return 'No matches.' + note;
+      return out.join('\n') + (total > out.length ? `\n… ${total - out.length} more matches (narrow with path_glob)` : '') + note;
     },
   },
   {
@@ -179,6 +231,10 @@ export const TOOLS: ToolDef[] = [
     schema: { path: z.string(), start_line: z.number().int().min(1).optional(), end_line: z.number().int().min(1).optional() },
     async run(a) {
       const { uri, rel } = resolvePath(a.path);
+      if (isSecretPath(rel)) {
+        audit.record('blocked.read', { path: rel });
+        return `Blocked: ${rel} looks like a secret/credential file. Anvil never sends these to the model. If you need configuration names, ask the user or read an example file (e.g. .env.example).`;
+      }
       const text = await readText(uri);
       if (text === undefined) return `File not found: ${rel}`;
       const lines = text.split(/\r?\n/);
@@ -265,6 +321,16 @@ export const TOOLS: ToolDef[] = [
     async run(a, d) {
       const run = d.runs.active;
       if (!run || run.cancelled) return 'No active run (cancelled). Command not executed.';
+      if (!workspaceTrusted()) return 'This workspace is not trusted (Restricted Mode). Anvil does not run commands in untrusted workspaces.';
+      if (!d.runs.isCommandApproved(String(a.command ?? ''))) {
+        // Commands only ever run after an explicit user approval. If TrueForge's approval gate did
+        // not fire (misconfigured agent), ask here; never run unapproved.
+        const ok = d.confirmCommand ? await d.confirmCommand(String(a.command ?? '')) : false;
+        if (!ok) {
+          audit.record('blocked.command', { command: a.command, reason: 'not approved' });
+          return 'Command not executed: it was not approved by the user.';
+        }
+      }
       return d.terminal.run(a.command, (a.timeout_s ?? 120) * 1000, run.abort.signal);
     },
   },
@@ -287,7 +353,7 @@ async function runWrite(tool: string, args: any, d: ToolDeps): Promise<string> {
   // Safety net: a write arrived without an approval-time review (e.g. approval not configured).
   // Review it now. There is no code path that writes without the user seeing the diff.
   d.log.appendLine(`[mcp] ${tool} ${rel}: no approval-time review found; reviewing inline`);
-  const res = await d.reviews.review(prepared.uri, prepared.original, prepared.proposed, { runId: run.id, title: `${tool} ${rel}`, isNewFile: prepared.isNewFile });
+  const res = await d.reviews.review(prepared.uri, prepared.original, prepared.proposed, { runId: run.id, title: `${tool} ${rel}`, isNewFile: prepared.isNewFile, warnings: prepared.warnings });
   if (run.cancelled) return 'The run was cancelled by the user. Pending hunks were discarded.';
   return describeReview(rel, res);
 }
@@ -321,10 +387,13 @@ export class CommandTerminal implements vscode.Disposable {
     if (!root) return Promise.resolve('No workspace.');
     const term = this.ensure();
     term.show(true);
-    const w = (s: string) => this.writeEmitter.fire(s.replace(/\r?\n/g, '\r\n'));
-    w(`\x1b[1;36m$ ${command}\x1b[0m\n`);
+    // Command output is untrusted: strip escape sequences that could write the clipboard (OSC 52),
+    // spoof the terminal title/hyperlinks or clear the screen.
+    const w = (s: string) => this.writeEmitter.fire(sanitizeTerminal(s).replace(/\r?\n/g, '\r\n'));
+    w(`\x1b[1;36m$ ${sanitizeTerminal(command)}\x1b[0m\n`);
+    audit.record('command.start', { command });
     return new Promise((resolve) => {
-      const env = commandEnv(root.fsPath);
+      const env = commandEnv(root.fsPath, { keepSecrets: getConfig().passSecretsToCommands });
       if (env.VIRTUAL_ENV) w(`[2m(using ${env.VIRTUAL_ENV})[0m
 `);
       const p = spawn(command, { cwd: root.fsPath, shell: true, env, windowsHide: true });
@@ -350,7 +419,10 @@ export class CommandTerminal implements vscode.Disposable {
         signal.removeEventListener('abort', onAbort);
         this.procs.delete(p);
         w(`\x1b[2m[exit ${code}]\x1b[0m\n\n`);
-        const tail = out.length > 8000 ? '…' + out.slice(-8000) : out;
+        audit.record('command.end', { command, exitCode: code });
+        // The model gets plain text: no escape sequences at all.
+        const plain = out.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][\s\S]*?(?:\x07|\x1b\\)/g, '');
+        const tail = plain.length > 8000 ? '…' + plain.slice(-8000) : plain;
         resolve(`exit code: ${code}\n${tail}`);
       });
       p.on('error', (e) => resolve(`Failed to start: ${e.message}`));
@@ -368,8 +440,11 @@ export class CommandTerminal implements vscode.Disposable {
 }
 
 /** Environment for agent commands: activates the workspace virtualenv (.venv / venv / env) if present. */
-export function commandEnv(root: string): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...process.env, PYTHONUNBUFFERED: '1' };
+export function commandEnv(root: string, opts: { keepSecrets?: boolean } = {}): NodeJS.ProcessEnv {
+  // Credentials in the editor's environment (API keys, tokens) are not handed to agent-run commands
+  // unless the user opts in: a prompt-injected command cannot exfiltrate what it cannot see.
+  const base = opts.keepSecrets ? { ...process.env } : scrubEnv(process.env).env;
+  const env: NodeJS.ProcessEnv = { ...base, PYTHONUNBUFFERED: '1' };
   delete env.ELECTRON_RUN_AS_NODE;
   for (const name of ['.venv', 'venv', 'env']) {
     const dir = path.join(root, name);

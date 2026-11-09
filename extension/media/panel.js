@@ -8,6 +8,7 @@
   let running = false;
   let currentAssistant = {}; // threadId -> element
   let currentReasoning = {}; // threadId -> thinking card
+  const usage = { in: 0, out: 0 };
   const toolCards = {}; // tool call id -> card
   const threadCards = {}; // subagent thread id -> card
   let mentionItems = [];
@@ -175,10 +176,25 @@
           c._dot.className = 'dot wait';
           c._sub.textContent = e.summary;
         }
+        if (c && e.warnings && e.warnings.length) {
+          const wb = el('div', 'notice warn', '⚠ ' + e.warnings.join('\n⚠ '));
+          c.after(wb);
+        }
         if (e.name === 'run_command') {
           const box = el('div', 'card');
           const row = el('div', 'approval');
-          row.append(el('span', '', '⚠ ' + e.summary));
+          const risk = (e.risk && e.risk.risk) || 'low';
+          row.append(el('span', 'risk ' + risk, risk.toUpperCase()));
+          row.append(el('code', 'cmd', e.summary.replace(/^Run: /, '')));
+          if (e.risk && e.risk.reasons.length) row.append(el('div', 'muted', e.risk.reasons.join(' · ')));
+          if (risk === 'high') {
+            row.append(el('div', 'muted', 'High-risk: confirm in the dialog.'));
+            box.append(row);
+            box.dataset.approval = e.id;
+            log.append(box);
+            scroll();
+            break;
+          }
           const ok = el('button', 'primary', 'Run');
           const no = el('button', '', 'Deny');
           const done = (v) => {
@@ -221,6 +237,13 @@
         }
         break;
       }
+      case 'usage': {
+        usage.in += e.inputTokens;
+        usage.out += e.outputTokens;
+        const k = (n) => (n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n));
+        $('usage').textContent = `↑${k(usage.in)} ↓${k(usage.out)} tokens`;
+        break;
+      }
       case 'compaction':
         log.append(el('div', 'notice info', e.phase === 'start' ? '⟳ TrueForge is compacting the context window…' : '✓ Context compacted (' + e.detail + ')'));
         break;
@@ -254,13 +277,14 @@
       log.append(el('div', 'msg user', m.text));
       scroll();
     } else if (m.type === 'cleared') {
-      log.innerHTML = '';
+      log.replaceChildren();
       log.append(el('div', 'empty', 'New conversation.'));
       $('session').textContent = '';
     } else if (m.type === 'config') {
       $('model').textContent = m.models.length ? m.models.join(' → ') : 'no model configured (set anvil.models)';
     } else if (m.type === 'mentionResults') showMentions(m.items);
     else if (m.type === 'undoState') $('revert').disabled = !m.count;
+    else if (m.type === 'ui' && m.event.t === 'usage') { /* handled in onUi */ }
     else if (m.type === 'changes') {
       const c = card('Changes in this run', `${m.files.length} file(s) changed — all reviewed by you`, 'context', false);
       c._dot.className = 'dot ok';
@@ -273,7 +297,7 @@
         if (f.created) td.append(el('span', 'tag', 'new'));
         td.append(a);
         const stat = el('td', 'tok');
-        stat.innerHTML = '';
+
         stat.append(el('span', 'add', '+' + f.added), document.createTextNode(' '), el('span', 'del', '−' + f.removed));
         tr.append(td, el('td', 'why', f.applies + ' accepted change' + (f.applies > 1 ? 's' : '')), stat);
         t.append(tr);
@@ -306,7 +330,7 @@
     mentionItems = items;
     mentionSel = 0;
     if (!items.length || mentionToken() === null) return hideMentions();
-    mentionsBox.innerHTML = '';
+    mentionsBox.replaceChildren();
     items.forEach((it, i) => {
       const d = el('div', i === 0 ? 'sel' : '');
       d.append(el('span', 'k', it.kind === 'file' ? 'file' : 'sym'), el('span', '', it.label));

@@ -110,6 +110,11 @@
         "title": "Anvil: Reject Hunk at Cursor",
         "category": "Anvil",
         "icon": "$(x)"
+      },
+      {
+        "command": "anvil.openAuditLog",
+        "title": "Anvil: Open Audit Log",
+        "category": "Anvil"
       }
     ],
     "keybindings": [
@@ -161,7 +166,8 @@
         "anvil.trueforgeUrl": {
           "type": "string",
           "default": "http://localhost:8790",
-          "description": "Base URL of the local TrueForge server."
+          "description": "Base URL of the local TrueForge server.",
+          "scope": "machine"
         },
         "anvil.models": {
           "type": "array",
@@ -174,12 +180,14 @@
         "anvil.mcpPort": {
           "type": "number",
           "default": 7337,
-          "description": "Port for Anvil's MCP server (127.0.0.1)."
+          "description": "Port for Anvil's MCP server (127.0.0.1).",
+          "scope": "machine"
         },
         "anvil.mcpPublicHost": {
           "type": "string",
           "default": "127.0.0.1",
-          "description": "Host TrueForge should use to reach Anvil's MCP server (use host.docker.internal if TrueForge runs in Docker)."
+          "description": "Host TrueForge should use to reach Anvil's MCP server (use host.docker.internal if TrueForge runs in Docker).",
+          "scope": "machine"
         },
         "anvil.contextBudgetTokens": {
           "type": "number",
@@ -203,6 +211,12 @@
             "type": "object"
           },
           "markdownDescription": "Per-model parameter overrides merged into the agent's `model.params`, keyed by model id. Example: `{\"ollama/qwen3-4b\": {\"reasoning_effort\": \"none\"}}` turns off long thinking for a small local reasoning model."
+        },
+        "anvil.passSecretsToCommands": {
+          "type": "boolean",
+          "default": false,
+          "scope": "machine",
+          "markdownDescription": "Pass credential-looking environment variables (`*_API_KEY`, `*_TOKEN`, `*SECRET*`, `*PASSWORD*`) to commands the agent runs. Off by default so a prompt-injected command cannot exfiltrate them."
         }
       }
     },
@@ -262,15 +276,29 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.32.2",
     "@truefoundry/trueforge-sdk": "0.184.1",
-    "diff": "^7.0.0",
-    "zod": "^3.25.76"
+    "diff": "9.0.0",
+    "zod": "4.6.7"
   },
   "devDependencies": {
-    "@types/diff": "^7.0.0",
-    "@types/node": "^22.10.0",
-    "@types/vscode": "^1.90.0",
-    "@vscode/test-electron": "^2.4.1",
-    "esbuild": "^0.24.0",
-    "typescript": "^5.7.0"
+    "@types/node": "22.20.5",
+    "@types/vscode": "1.90.0",
+    "@vscode/test-electron": "2.4.1",
+    "esbuild": "0.28.2",
+    "typescript": "5.9.3"
+  },
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "In untrusted (Restricted Mode) workspaces Anvil can read and explain code but will not write files or run commands.",
+      "restrictedConfigurations": [
+        "anvil.models",
+        "anvil.modelParams",
+        "anvil.trueforgeUrl",
+        "anvil.mcpPublicHost",
+        "anvil.mcpPort",
+        "anvil.passSecretsToCommands"
+      ]
+    },
+    "virtualWorkspaces": false
   }
 }

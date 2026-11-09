@@ -9,6 +9,7 @@ export interface AnvilConfig {
   retries: number;
   iterationLimit: number;
   modelParams: Record<string, Record<string, unknown>>;
+  passSecretsToCommands: boolean;
 }
 
 export function getConfig(): AnvilConfig {
@@ -22,5 +23,6 @@ export function getConfig(): AnvilConfig {
     retries: c.get<number>('retries') ?? 2,
     iterationLimit: c.get<number>('iterationLimit') ?? 60,
     modelParams: c.get<Record<string, Record<string, unknown>>>('modelParams') ?? {},
+    passSecretsToCommands: c.get<boolean>('passSecretsToCommands') ?? false,
   };
 }

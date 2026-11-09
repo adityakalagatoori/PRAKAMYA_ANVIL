@@ -110,7 +110,9 @@ export function applySearchReplace(content: string, oldStr: string, newStr: stri
   if (o === '') return { ok: false, error: 'old_string is empty. Use create_file for new files, or include surrounding lines to anchor an insertion.' };
   let idx = c.indexOf(o);
   if (idx >= 0 && c.indexOf(o, idx + 1) >= 0) {
-    return { ok: false, error: 'old_string matches more than one location. Include more surrounding lines so it is unique.' };
+    const lines: number[] = [];
+    for (let at = idx; at >= 0 && lines.length < 6; at = c.indexOf(o, at + 1)) lines.push(c.slice(0, at).split('\n').length);
+    return { ok: false, error: `old_string matches ${lines.length > 5 ? 'more than 5' : lines.length} locations (lines ${lines.slice(0, 5).join(', ')}). Include more surrounding lines so it is unique.` };
   }
   let out: string | undefined;
   if (idx >= 0) out = c.slice(0, idx) + n + c.slice(idx + o.length);
@@ -126,16 +128,48 @@ export function applySearchReplace(content: string, oldStr: string, newStr: stri
       if (ok) matches.push(i);
     }
     if (matches.length !== 1) {
-      return {
-        ok: false,
-        error: matches.length
-          ? 'old_string matches more than one location. Include more surrounding lines so it is unique.'
-          : 'old_string was not found in the file. Re-read the file with read_file and copy the exact text (including indentation).',
-      };
+      if (matches.length) {
+        return { ok: false, error: `old_string matches ${matches.length} locations (lines ${matches.slice(0, 5).map((m) => m + 1).join(', ')}). Include more surrounding lines so it is unique.` };
+      }
+      return { ok: false, error: 'old_string was not found in the file.' + closestMatchHint(cl, ol) };
     }
     const nl = n.replace(/\n$/, '').split('\n');
     cl.splice(matches[0], ol.length, ...nl);
     out = cl.join('\n');
   }
   return { ok: true, result: eol === '\r\n' ? out.replace(/\n/g, '\r\n') : out };
+}
+
+/**
+ * "Diff Edit Failed" loops are the most reported failure in agentic editors (e.g. Cline #1195/#1511):
+ * the model retries the same wrong old_string. Show it the closest real region (indentation-insensitive
+ * line similarity) with line numbers so it can correct the edit in one step.
+ */
+export function closestMatchHint(fileLines: string[], wanted: string[]): string {
+  const norm = (s: string) => s.trim().replace(/\s+/g, ' ');
+  const want = wanted.map(norm).filter(Boolean);
+  if (!want.length || !fileLines.length) return ' Re-read the file with read_file and copy the exact text (including indentation).';
+  const fileNorm = fileLines.map(norm);
+  let best = -1;
+  let bestScore = 0;
+  const span = wanted.length;
+  for (let i = 0; i < fileLines.length; i++) {
+    let score = 0;
+    for (let j = 0; j < span && i + j < fileLines.length; j++) {
+      const a = fileNorm[i + j];
+      const b = norm(wanted[j] ?? '');
+      if (!b) continue;
+      if (a === b) score += 2;
+      else if (a && (a.includes(b) || b.includes(a))) score += 1;
+    }
+    if (score > bestScore) {
+      bestScore = score;
+      best = i;
+    }
+  }
+  if (best < 0 || bestScore < 2) return ' No similar region found; the code may live in another file. Use search_code or find_symbol, then read_file.';
+  const from = Math.max(0, best - 1);
+  const to = Math.min(fileLines.length, best + span + 1, from + 20);
+  const snippet = fileLines.slice(from, to).map((l, k) => `${String(from + k + 1).padStart(5)}| ${l}`).join('\n');
+  return ` The closest region is lines ${from + 1}-${to} (shown with line numbers; do NOT copy the "NNNNN| " prefixes):\n${snippet}\nCopy old_string exactly from this text, including indentation.`;
 }

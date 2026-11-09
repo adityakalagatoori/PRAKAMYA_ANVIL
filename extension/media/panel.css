@@ -59,3 +59,8 @@ button.danger { background: var(--vscode-inputValidation-errorBorder, #be1100); 
 code { font-family: var(--vscode-editor-font-family); background: var(--vscode-textCodeBlock-background); padding: 0 3px; border-radius: 3px; }
 .add { color: var(--vscode-gitDecoration-addedResourceForeground, #3fb950); }
 .del { color: var(--vscode-gitDecoration-deletedResourceForeground, #f85149); }
+.risk { font-size: 0.8em; font-weight: 700; padding: 0 6px; border-radius: 3px; }
+.risk.low { background: var(--vscode-testing-iconPassed, #3fb950); color: #000; }
+.risk.medium { background: var(--vscode-editorWarning-foreground, #d29922); color: #000; }
+.risk.high { background: var(--vscode-inputValidation-errorBorder, #f85149); color: #fff; }
+code.cmd { white-space: pre-wrap; word-break: break-all; flex-basis: 100%; }

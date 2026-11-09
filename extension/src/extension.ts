@@ -6,7 +6,9 @@ import { ReviewManager } from './review/reviewManager';
 import { UndoStack } from './review/undo';
 import { RunState } from './runState';
 import { AnvilMcpServer } from './mcp/server';
-import { CommandTerminal, workspaceRoot } from './mcp/tools';
+import { CommandTerminal, workspaceRoot, workspaceTrusted } from './mcp/tools';
+import { audit } from './security/audit';
+import { analyzeCommand } from './security/policy';
 import { TrueForgeGateway } from './trueforge/gateway';
 import { AgentRunner } from './trueforge/runner';
 import { AgentPanel } from './agent/panel';
@@ -36,14 +38,33 @@ export async function activate(ctx: vscode.ExtensionContext) {
   const terminal = new CommandTerminal();
   ctx.subscriptions.push(index, reviews, terminal);
 
+  // Audit trail lives in per-workspace extension storage (never in the repo).
+  audit.configure(ctx.storageUri?.fsPath ?? ctx.globalStorageUri.fsPath);
+  audit.record('session.start', { trusted: workspaceTrusted() });
+
   // Per-install secret so only TrueForge (which we hand it to) can call the editor's tools.
-  let token = ctx.globalState.get<string>('anvil.mcpToken');
+  // Kept in the OS keychain via SecretStorage (migrated from older globalState storage).
+  let token = await ctx.secrets.get('anvil.mcpToken');
   if (!token) {
-    token = randomBytes(24).toString('hex');
-    await ctx.globalState.update('anvil.mcpToken', token);
+    token = ctx.globalState.get<string>('anvil.mcpToken') ?? randomBytes(32).toString('hex');
+    await ctx.secrets.store('anvil.mcpToken', token);
+    await ctx.globalState.update('anvil.mcpToken', undefined);
   }
 
-  const mcp = new AnvilMcpServer({ index, reviews, runs, log, terminal }, token, log);
+  // Fallback approval for a command that reached the MCP server without a TrueForge approval.
+  const confirmCommand = async (command: string) => {
+    const risk = analyzeCommand(command);
+    const pick = await vscode.window.showWarningMessage(
+      'Anvil agent wants to run a command that was not approved through TrueForge',
+      { modal: true, detail: `${command}\n\nRisk: ${risk.risk.toUpperCase()}${risk.reasons.length ? ' — ' + risk.reasons.join(', ') : ''}` },
+      'Run',
+    );
+    return pick === 'Run';
+  };
+
+  const mcp = new AnvilMcpServer({ index, reviews, runs, log, terminal, confirmCommand }, token, log);
+  const publicHost = getConfig().mcpPublicHost;
+  if (!/^(127\.0\.0\.1|localhost)$/i.test(publicHost)) mcp.extraHosts = [publicHost];
   ctx.subscriptions.push(mcp);
   let mcpPort = getConfig().mcpPort;
   for (let i = 0; i < 10; i++) {
@@ -107,6 +128,17 @@ export async function activate(ctx: vscode.ExtensionContext) {
         vscode.window.showWarningMessage(`Anvil: ${(err as Error).message}`);
       }
     }),
+    vscode.commands.registerCommand('anvil.openAuditLog', async () => {
+      await audit.flush();
+      const f = audit.file;
+      if (!f) return vscode.window.showInformationMessage('Anvil: no audit log for this session yet.');
+      try {
+        await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(vscode.Uri.file(f)), { preview: true });
+      } catch {
+        vscode.window.showInformationMessage('Anvil: the audit log is empty so far.');
+      }
+    }),
+    vscode.workspace.onDidGrantWorkspaceTrust(() => audit.record('workspace.trusted')),
     vscode.commands.registerCommand('anvil.reindex', async () => {
       await index.rebuild();
       vscode.window.showInformationMessage(`Anvil: indexed ${index.current.files.size} files.`);

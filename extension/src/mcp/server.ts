@@ -2,7 +2,34 @@ import * as http from 'node:http';
 import * as vscode from 'vscode';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { timingSafeEqual } from 'node:crypto';
 import { TOOLS, ToolDeps } from './tools';
+import { sanitizeForModel } from '../security/policy';
+import { audit } from '../security/audit';
+
+const MAX_BODY = 4 * 1024 * 1024;
+
+function tokenOk(given: unknown, expected: string): boolean {
+  if (typeof given !== 'string') return false;
+  const a = Buffer.from(given);
+  const b = Buffer.from(expected);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
+/**
+ * DNS-rebinding / CSRF defence (MCP Inspector CVE-2025-49596 class): only loopback Host headers are
+ * accepted, and any request carrying a browser Origin is refused. TrueForge is a server-side client
+ * and sends no Origin.
+ */
+export function requestAllowed(headers: http.IncomingHttpHeaders, port: number, extraHosts: string[] = []): string | undefined {
+  const host = String(headers.host ?? '').toLowerCase();
+  const allowed = new Set([`127.0.0.1:${port}`, `localhost:${port}`, `[::1]:${port}`, ...extraHosts.map((h) => `${h.toLowerCase()}:${port}`)]);
+  if (!allowed.has(host)) return `host ${host || '(none)'} not allowed`;
+  if (headers.origin !== undefined) return 'browser origin not allowed';
+  const site = headers['sec-fetch-site'];
+  if (site && site !== 'none' && site !== 'same-origin') return 'cross-site request';
+  return undefined;
+}
 
 export const MCP_SERVER_NAME = 'anvil-editor';
 
@@ -40,8 +67,19 @@ export class AnvilMcpServer implements vscode.Disposable {
         (async (args: unknown) => {
           const t0 = Date.now();
           this.listeners.forEach((l) => l({ tool: t.name, args, phase: 'start' }));
+          audit.record('tool.call', { tool: t.name, args: summarizeArgs(args), runId: this.deps.runs.active?.id });
+          // Circuit breaker: identical repeated calls / runaway runs get a corrective message instead.
+          const loop = this.deps.runs.loopGuard.check(t.name, args);
+          if (loop) {
+            audit.record('tool.loop_blocked', { tool: t.name });
+            return { content: [{ type: 'text' as const, text: loop }], isError: true };
+          }
           try {
-            const text = await t.run(args, this.deps);
+            const raw = await t.run(args, this.deps);
+            // Everything returned to the model is sanitised: secrets redacted, hidden Unicode revealed.
+            const clean = sanitizeForModel(raw);
+            if (clean.redactions || clean.hidden) audit.record('tool.sanitized', { tool: t.name, redactions: clean.redactions, hidden: clean.hidden });
+            const text = clean.text;
             this.log.appendLine(`[mcp] ${t.name} ok (${Date.now() - t0}ms)`);
             this.listeners.forEach((l) => l({ tool: t.name, args, phase: 'end', ok: true, ms: Date.now() - t0 }));
             return { content: [{ type: 'text' as const, text }] };
@@ -57,6 +95,10 @@ export class AnvilMcpServer implements vscode.Disposable {
     return mcp;
   }
 
+  private port = 0;
+  /** Extra Host names allowed (e.g. host.docker.internal when TrueForge runs in Docker). */
+  extraHosts: string[] = [];
+
   async start(port: number): Promise<number> {
     this.server = http.createServer(async (req, res) => {
       try {
@@ -64,7 +106,13 @@ export class AnvilMcpServer implements vscode.Disposable {
           res.writeHead(req.url === '/health' ? 200 : 404).end(req.url === '/health' ? 'ok' : 'not found');
           return;
         }
-        if (req.headers['x-anvil-token'] !== this.token) {
+        const why = requestAllowed(req.headers, this.port, this.extraHosts);
+        if (why) {
+          audit.record('mcp.rejected', { reason: why });
+          res.writeHead(403, { 'content-type': 'application/json' }).end(JSON.stringify({ error: why }));
+          return;
+        }
+        if (!tokenOk(req.headers['x-anvil-token'], this.token)) {
           res.writeHead(401, { 'content-type': 'application/json' }).end(JSON.stringify({ error: 'bad or missing x-anvil-token' }));
           return;
         }
@@ -93,6 +141,9 @@ export class AnvilMcpServer implements vscode.Disposable {
     });
     const addr = this.server.address();
     const bound = typeof addr === 'object' && addr ? addr.port : port;
+    this.port = bound;
+    this.server.requestTimeout = 15 * 60_000;
+    this.server.headersTimeout = 30_000;
     this.log.appendLine(`[mcp] ${MCP_SERVER_NAME} listening on http://127.0.0.1:${bound}/mcp`);
     return bound;
   }
@@ -102,10 +153,27 @@ export class AnvilMcpServer implements vscode.Disposable {
   }
 }
 
+function summarizeArgs(args: unknown): unknown {
+  // Audit entries keep paths/queries/commands but not whole file contents.
+  if (!args || typeof args !== 'object') return args;
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(args as Record<string, unknown>)) out[k] = typeof v === 'string' && v.length > 300 ? `${v.slice(0, 120)}… (${v.length} chars)` : v;
+  return out;
+}
+
 function readBody(req: http.IncomingMessage): Promise<unknown> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
-    req.on('data', (c) => chunks.push(c));
+    let size = 0;
+    req.on('data', (c: Buffer) => {
+      size += c.length;
+      if (size > MAX_BODY) {
+        reject(new Error('request body too large'));
+        req.destroy();
+        return;
+      }
+      chunks.push(c);
+    });
     req.on('end', () => {
       const raw = Buffer.concat(chunks).toString('utf8');
       if (!raw) return resolve(undefined);

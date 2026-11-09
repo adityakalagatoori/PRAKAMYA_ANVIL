@@ -4,6 +4,7 @@ import { ReviewManager } from '../review/reviewManager';
 import { WorkspaceIndex } from '../context/workspaceIndex';
 import { assembleContext, renderPack, parseMentions } from '../context/assembler';
 import { getConfig } from '../config';
+import { sanitizeForModel } from '../security/policy';
 
 /**
  * Inline edit: select code → Ctrl+Alt+K → instruction → streamed diff in the editor → per-hunk review.
@@ -51,7 +52,7 @@ export async function inlineEdit(runner: AgentRunner, reviews: ReviewManager, in
   const after = doc.getText(new vscode.Range(range.end, doc.lineAt(doc.lineCount - 1).range.end));
   const selected = doc.getText(range);
 
-  const prompt = buildPrompt(idx, rel, doc, startLine, endLine, selected, instruction, getConfig().contextBudgetTokens);
+  const prompt = sanitizeForModel(buildPrompt(idx, rel, doc, startLine, endLine, selected, instruction, getConfig().contextBudgetTokens)).text;
   log.appendLine(`[inline] ${rel}:${startLine + 1}-${endLine + 1} "${instruction}"`);
 
   const stream = await reviews.openStreaming(doc.uri, original, { runId: 'inline', title: `inline: ${instruction.slice(0, 40)}` });

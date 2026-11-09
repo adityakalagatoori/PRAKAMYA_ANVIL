@@ -2,8 +2,11 @@ import * as vscode from 'vscode';
 import { AgentRunner, RunSink, UiEvent } from '../trueforge/runner';
 import { WorkspaceIndex } from '../context/workspaceIndex';
 import { assembleContext, parseMentions, renderPack, summarizePack } from '../context/assembler';
+import { sanitizeForModel } from '../security/policy';
 import { UndoStack } from '../review/undo';
 import { getConfig } from '../config';
+import { randomBytes } from 'node:crypto';
+import { resolvePath } from '../mcp/tools';
 import { computeHunks } from '../review/diff';
 
 function lineDelta(a: string, b: string) {
@@ -90,11 +93,20 @@ export class AgentPanel implements vscode.WebviewViewProvider {
         this.pendingCommandApprovals.delete(m.id);
         break;
       case 'open':
-        if (m.url) void vscode.env.openExternal(vscode.Uri.parse(m.url));
-        else if (m.path) {
-          const root = vscode.workspace.workspaceFolders?.[0]?.uri;
-          if (!root) return;
-          const doc = await vscode.workspace.openTextDocument(vscode.Uri.joinPath(root, m.path));
+        if (m.url) {
+          // Only ever open the configured TrueForge origin (webview messages are treated as untrusted).
+          const tf = vscode.Uri.parse(getConfig().trueforgeUrl);
+          const target = vscode.Uri.parse(String(m.url));
+          if ((target.scheme === 'http' || target.scheme === 'https') && target.authority === tf.authority) void vscode.env.openExternal(target);
+          else this.log.appendLine(`[panel] refused to open ${m.url}`);
+        } else if (m.path) {
+          let uri: vscode.Uri;
+          try {
+            uri = resolvePath(String(m.path)).uri;
+          } catch {
+            return;
+          }
+          const doc = await vscode.workspace.openTextDocument(uri);
           const line = Math.max(0, (Number(m.line) || 1) - 1);
           await vscode.window.showTextDocument(doc, { selection: new vscode.Range(line, 0, line, 0), preview: true });
         }
@@ -119,7 +131,12 @@ export class AgentPanel implements vscode.WebviewViewProvider {
     const pack = assembleContext(idx, text, { budget: getConfig().contextBudgetTokens, mentions });
     this.post({ type: 'user', text });
     this.post({ type: 'ui', event: { t: 'context', summary: summarizePack(pack) } });
-    const message = `${text}\n\n${renderPack(pack)}`;
+    // Workspace content is untrusted data: redact secrets and reveal hidden Unicode before it reaches the model.
+    const safe = sanitizeForModel(renderPack(pack));
+    if (safe.redactions || safe.hidden) {
+      this.post({ type: 'ui', event: { t: 'notice', level: 'warn', text: `Context sanitised: ${safe.redactions} secret(s) redacted, ${safe.hidden} hidden Unicode character(s) revealed.` } });
+    }
+    const message = `${text}\n\n${safe.text}`;
     const sink: RunSink = {
       emit: (e) => {
         if (e.t === 'run.start') this.lastRunId = e.runId;
@@ -141,15 +158,34 @@ export class AgentPanel implements vscode.WebviewViewProvider {
           if (byFile.size) this.post({ type: 'changes', files: [...byFile.entries()].map(([path, v]) => ({ path, ...v })) });
         }
       },
-      approveCommand: (id, command) =>
+      approveCommand: (id, command, risk) =>
         new Promise<boolean>((resolve) => {
           this.pendingCommandApprovals.set(id, resolve);
-          // Also offer it as a notification so it is visible when the panel is hidden.
-          void vscode.window.showInformationMessage(`Anvil agent wants to run: ${command}`, 'Run', 'Deny').then((pick) => {
-            if (!this.pendingCommandApprovals.has(id) || pick === undefined) return;
-            this.pendingCommandApprovals.get(id)!(pick === 'Run');
+          const settle = (ok: boolean) => {
+            if (!this.pendingCommandApprovals.has(id)) return;
+            this.pendingCommandApprovals.get(id)!(ok);
             this.pendingCommandApprovals.delete(id);
             this.post({ type: 'commandDecided', id });
+          };
+          if (risk.risk === 'high') {
+            // High-risk commands need a deliberate, modal decision (no one-click approval from the panel).
+            this.post({ type: 'commandDecided', id });
+            void vscode.window
+              .showWarningMessage(
+                `Anvil agent wants to run a HIGH-RISK command`,
+                {
+                  modal: true,
+                  detail: `${command}\n\nWhy this is flagged:\n${risk.reasons.map((r) => '• ' + r).join('\n')}\n\nPrompt injection in repository files can make an agent propose commands like this.`,
+                },
+                'Run anyway',
+              )
+              .then((pick) => settle(pick === 'Run anyway'));
+            return;
+          }
+          // Also offer it as a notification so it is visible when the panel is hidden.
+          const label = risk.risk === 'medium' ? `⚠ ${risk.reasons.join(', ')}: ` : '';
+          void vscode.window.showInformationMessage(`Anvil agent wants to run: ${label}${command}`, 'Run', 'Deny').then((pick) => {
+            if (pick !== undefined) settle(pick === 'Run');
           });
         }),
     };
@@ -171,15 +207,15 @@ export class AgentPanel implements vscode.WebviewViewProvider {
   }
 
   private html(webview: vscode.Webview, media: vscode.Uri) {
-    const nonce = Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+    const nonce = randomBytes(18).toString('base64url');
     const js = webview.asWebviewUri(vscode.Uri.joinPath(media, 'panel.js'));
     const css = webview.asWebviewUri(vscode.Uri.joinPath(media, 'panel.css'));
     return `<!doctype html><html><head><meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource}; script-src 'nonce-${nonce}';">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'none'; connect-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'; style-src ${webview.cspSource}; script-src 'nonce-${nonce}';">
 <meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="${css}"></head>
 <body>
 <header id="hdr">
-  <div class="row"><span id="status" class="pill">idle</span><span id="model" class="muted"></span></div>
+  <div class="row"><span id="status" class="pill">idle</span><span id="model" class="muted"></span><span class="spacer"></span><span id="usage" class="muted" title="Tokens used in this conversation (all turns)"></span></div>
   <div class="row"><a id="session" class="muted" href="#"></a><span class="spacer"></span>
     <button id="undo" title="Undo last applied change">Undo</button>
     <button id="revert" title="Revert every change from the last run" disabled>Revert run</button>

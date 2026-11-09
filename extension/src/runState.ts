@@ -1,4 +1,5 @@
 import { ReviewResult } from './review/reviewManager';
+import { LoopGuard } from './security/policy';
 
 /**
  * Shared state between the run controller (which sees TrueForge events and drives reviews)
@@ -32,11 +33,29 @@ export class RunState {
   active: ActiveRun | undefined;
   /** Reviews completed during TrueForge approval, waiting for the tool call to report them. */
   private decisions = new Map<string, WriteDecision>();
+  /** Commands the user approved in this run (consumed when executed). */
+  private approvedCommands = new Map<string, number>();
+  /** Circuit breaker for repeated identical tool calls / runaway runs. */
+  readonly loopGuard = new LoopGuard(3, 250);
 
   start(id: string): ActiveRun {
     this.active = { id, cancelled: false, abort: new AbortController() };
     this.decisions.clear();
+    this.approvedCommands.clear();
+    this.loopGuard.reset();
     return this.active;
+  }
+
+  approveCommand(cmd: string) {
+    this.approvedCommands.set(cmd, (this.approvedCommands.get(cmd) ?? 0) + 1);
+  }
+
+  /** True (and consumes the approval) if the user approved exactly this command in this run. */
+  isCommandApproved(cmd: string): boolean {
+    const n = this.approvedCommands.get(cmd) ?? 0;
+    if (n <= 0) return false;
+    this.approvedCommands.set(cmd, n - 1);
+    return true;
   }
 
   cancel() {
@@ -45,6 +64,7 @@ export class RunState {
       this.active.abort.abort();
     }
     this.decisions.clear();
+    this.approvedCommands.clear();
   }
 
   end(id: string) {

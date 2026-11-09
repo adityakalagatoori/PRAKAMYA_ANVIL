@@ -4,7 +4,9 @@ import { AgentKind, TrueForgeGateway, TrueForgeUnreachable, isTransient } from '
 import { ReviewManager } from '../review/reviewManager';
 import { UndoStack } from '../review/undo';
 import { RunState, canonicalKey } from '../runState';
-import { WRITE_TOOLS, describeReview, prepareWrite } from '../mcp/tools';
+import { WRITE_TOOLS, describeReview, prepareWrite, workspaceTrusted } from '../mcp/tools';
+import { CommandRisk, analyzeCommand } from '../security/policy';
+import { audit } from '../security/audit';
 import { getConfig } from '../config';
 
 /** UI-facing events (rendered by the agent panel; the inline editor listens to a subset). */
@@ -17,7 +19,8 @@ export type UiEvent =
   | { t: 'message.done'; threadId: string }
   | { t: 'tool.start'; id: string; threadId: string; name: string; args: unknown }
   | { t: 'tool.result'; id: string; content: string; ok: boolean }
-  | { t: 'approval'; id: string; name: string; summary: string }
+  | { t: 'approval'; id: string; name: string; summary: string; risk?: CommandRisk; warnings?: string[] }
+  | { t: 'usage'; inputTokens: number; outputTokens: number }
   | { t: 'approval.resolved'; id: string; allowed: boolean; summary: string }
   | { t: 'thread'; threadId: string; title: string; input: string }
   | { t: 'thread.done'; threadId: string; status: string }
@@ -29,7 +32,7 @@ export type UiEvent =
 export interface RunSink {
   emit(e: UiEvent): void;
   /** Ask the user to approve a shell command. */
-  approveCommand(id: string, command: string): Promise<boolean>;
+  approveCommand(id: string, command: string, risk: CommandRisk): Promise<boolean>;
 }
 
 export interface RunResult {
@@ -208,6 +211,7 @@ export class AgentRunner {
               bases.set(ev.id, base);
             }
             mergeEventDelta(base, ev);
+            if (ev.usage && (ev.usage as any).inputTokens !== undefined) sink.emit({ t: 'usage', inputTokens: (ev.usage as any).inputTokens ?? 0, outputTokens: (ev.usage as any).outputTokens ?? 0 });
             if (ev.finishReason) finalise(base);
             break;
           }
@@ -310,22 +314,28 @@ export class AgentRunner {
     if (WRITE_TOOLS.has(info.name)) {
       const prepared = await prepareWrite(info.name, info.args);
       if ('error' in prepared) {
+        audit.record('approval.auto_deny', { tool: info.name, reason: prepared.error });
         sink.emit({ t: 'approval.resolved', id, allowed: false, summary: prepared.error });
         return { status: 'deny', reason: `Anvil could not build a diff: ${prepared.error}` };
       }
-      sink.emit({ t: 'approval', id, name: info.name, summary: `Review ${prepared.rel} in the diff editor (accept/reject each hunk)` });
-      const review = await this.reviews.review(prepared.uri, prepared.original, prepared.proposed, { runId, title: `${info.name} ${prepared.rel}`, isNewFile: prepared.isNewFile });
+      sink.emit({ t: 'approval', id, name: info.name, summary: `Review ${prepared.rel} in the diff editor (accept/reject each hunk)`, warnings: prepared.warnings });
+      const review = await this.reviews.review(prepared.uri, prepared.original, prepared.proposed, { runId, title: `${info.name} ${prepared.rel}`, isNewFile: prepared.isNewFile, warnings: prepared.warnings });
       const summary = describeReview(prepared.rel, review);
       if (signal.aborted || review.status === 'cancelled') return { status: 'deny', reason: 'Run cancelled by the user.' };
       this.runs.recordDecision(canonicalKey(info.name, info.args), { tool: info.name, path: prepared.rel, review, createdAt: Date.now() });
       const allowed = review.accepted.length > 0;
+      audit.record('approval', { tool: info.name, path: prepared.rel, allowed, accepted: review.accepted.length, total: review.total });
       sink.emit({ t: 'approval.resolved', id, allowed, summary });
       return allowed ? { status: 'allow' } : { status: 'deny', reason: summary };
     }
     if (info.name === 'run_command') {
       const cmd = String(info.args?.command ?? '');
-      sink.emit({ t: 'approval', id, name: info.name, summary: `Run: ${cmd}` });
-      const ok = await this.raceAbort(sink.approveCommand(id, cmd), signal, false);
+      if (!workspaceTrusted()) return { status: 'deny', reason: 'Workspace is not trusted; commands are disabled.' };
+      const risk = analyzeCommand(cmd);
+      sink.emit({ t: 'approval', id, name: info.name, summary: `Run: ${cmd}`, risk });
+      const ok = await this.raceAbort(sink.approveCommand(id, cmd, risk), signal, false);
+      audit.record('approval', { tool: 'run_command', command: cmd, risk: risk.risk, reasons: risk.reasons, allowed: ok });
+      if (ok) this.runs.approveCommand(cmd);
       sink.emit({ t: 'approval.resolved', id, allowed: ok, summary: ok ? `Approved: ${cmd}` : `Denied: ${cmd}` });
       return ok ? { status: 'allow' } : { status: 'deny', reason: 'The user declined to run this command.' };
     }

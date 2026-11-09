@@ -20,6 +20,11 @@ Built **from scratch**. There is no upstream fork. Libraries: `@truefoundry/true
 - **Resilience.** TrueForge has no model fallback, so Anvil adds it. A `turn.done{status:error}` or a transport failure is classified. Transient errors (429, 5xx, timeouts, connection refused) are retried after 1 s and then 3 s. Auth and config errors skip retries. Anvil then opens a fresh session on the next model's agent with the same input. If edits were already applied in this run, the new session is told which files changed.
 - **Cancellation.** Stop aborts the SSE stream, calls `sessions.cancel`, kills running commands (the whole process tree), closes open reviews, and makes the MCP write handlers refuse further writes. Pending hunks are never applied, and each accepted hunk is atomic, so there is never a half-applied edit. A notification offers "Revert this run".
 
+**Security** (details in SECURITY.md). We grouped the published vulnerabilities in AI coding tools into 13 classes and built a tested control for each:
+- Copilot CVE-2025-53773, Cursor CurXecute/MCPoison, Roo CVE-2025-53097, MCP Inspector CVE-2025-49596, the Rules File Backdoor, GlassWorm, and the Amazon Q wiper prompt.
+- Controls: a protected-path policy with modal confirmation; secret blocking and redaction; hidden-Unicode reveal; a Host/Origin-checked token server; risk-rated commands; workspace trust; a loop guard; an audit log.
+- Our own dependencies were audited to 0 vulnerabilities, which meant upgrading zod (a high-severity advisory).
+
 ## 4. How context is selected
 **Index.** On activation Anvil indexes the workspace and keeps the index updated with a file watcher. Flask (200 files, about 1,670 chunks) indexes in under 0.3 s. Chunks are definition-level: a Python function, class or method with its decorators attached; a docs section; or a 60-line window for other files. A symbol table and an import graph are built alongside.
 
