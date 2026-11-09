@@ -142,3 +142,18 @@ test('loop guard: identical calls tripped on the 4th repeat; total budget enforc
   for (let i = 0; i < 5; i++) g.check('x', { i });
   assert.match(g.check('y', {})!, /budget/);
 });
+
+test('audit log redacts secrets in recorded arguments', async () => {
+  const { AuditLog } = await import('../src/security/audit');
+  const { mkdtempSync, readFileSync, readdirSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const dir = mkdtempSync(join(tmpdir(), 'anvil-audit-'));
+  const a = new AuditLog();
+  a.configure(dir);
+  a.record('tool.call', { tool: 'edit_file', args: { new_string: 'KEY="AKIAIOSFODNN7EXAMPLE"' } });
+  await a.flush();
+  const txt = readFileSync(join(dir, readdirSync(dir)[0]), 'utf8');
+  assert.match(txt, /REDACTED:aws-access-key-id/);
+  assert.ok(!txt.includes('AKIAIOSFODNN7EXAMPLE'));
+});

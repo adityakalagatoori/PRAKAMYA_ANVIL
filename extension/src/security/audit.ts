@@ -1,5 +1,6 @@
 import { appendFile, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
+import { redactSecrets } from './policy';
 
 /**
  * Append-only JSONL audit trail of agent activity: tool calls, approvals/denials, applied writes,
