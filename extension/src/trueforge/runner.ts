@@ -12,7 +12,8 @@ import { WorkspaceView, reviewExecution } from '../security/execution';
 import { existsSync, readFileSync } from 'node:fs';
 import * as nodePath from 'node:path';
 import { CommandTerminal, ToolDeps, contractEnv, workspaceRoot } from '../mcp/tools';
-import { contractCard, contractCommands, evaluate, failing, finishGateMessage, forbiddenBy, parseContract } from '../review/contract';
+import { MCP_SERVER_NAME } from '../mcp/server';
+import { contractCard, contractCommands, evaluate, failing, finishGateMessage, forbiddenBy, parseContract, pinVerifiers, verifierWriteViolation } from '../review/contract';
 import { getConfig } from '../config';
 import { CodeIndex } from '../context/index';
 import { AdmissionReport, admissionSummary, assessAdmission, shouldHold } from '../review/grounding';
@@ -77,6 +78,8 @@ export interface RunResult {
 interface ToolCallInfo {
   id: string;
   threadId: string;
+  /** MCP server that owns the tool, when TrueForge tells us (toolInfo.serverName or a "server__tool" name). */
+  server?: string;
   rawName: string;
   name: string; // normalised tool name
   args: any; // normalised (unwrapped) args
@@ -184,6 +187,11 @@ export class AgentRunner {
             if (applied.length) {
               turnInput = `${input}\n\n<note>A previous attempt in this run already applied changes to: ${[...new Set(applied.map((a) => a.relPath))].join(', ')}. Re-read those files and continue from their current state; do not redo applied changes.</note>`;
             }
+            // Cross-model/session fallback: this fresh session was NOT shown the old session's context
+            // pack or reads, only the short note above. Observations recorded for the old session no
+            // longer describe what THIS model has seen, so P1 grounding must not treat them as valid —
+            // otherwise a hallucination the old model avoided could slip past admission for the new one.
+            if (!(slot === startSlot && attempt === 0)) this.runs.ledger.clear();
           }
           this.current.sessionId = sessionId;
           sink.emit({ t: 'session', sessionId, url: this.gw.sessionUrl(sessionId), agent: this.gw.agentName(kind, slot), model: models[slot], slot });
@@ -397,7 +405,15 @@ export class AgentRunner {
 
   private async decide(info: ToolCallInfo | undefined, id: string, sink: RunSink, signal: AbortSignal): Promise<TrueForge.ApprovalDecision> {
     const runId = this.runs.active?.id ?? 'none';
-    if (!info) return { status: 'allow' };
+    if (!info) return { status: 'deny', reason: 'Anvil could not identify this tool call, so it was not approved.' };
+    // Tool shadowing: a third-party MCP server exposing a tool named like Anvil's (edit_file,
+    // run_command…) would otherwise get Anvil's review/approval and then run the attacker's code.
+    if (isShadowing(info, MCP_SERVER_NAME)) {
+      audit.record('mcp.shadowing_blocked', { server: info.server, tool: info.name });
+      sink.emit({ t: 'notice', level: 'error', text: `Blocked tool "${info.name}" from MCP server "${info.server}": it impersonates an Anvil tool.` });
+      sink.emit({ t: 'approval.resolved', id, allowed: false, summary: `Blocked: ${info.server}.${info.name} shadows an Anvil tool` });
+      return { status: 'deny', reason: `Tool ${info.server}.${info.name} shadows Anvil's built-in ${info.name} and was blocked. Use Anvil's own tool.` };
+    }
     if (info.name === 'propose_contract') {
       const parsed = parseContract(info.args);
       if (!parsed.contract) {
@@ -418,6 +434,15 @@ export class AgentRunner {
       sink.emit({ t: 'approval.resolved', id, allowed: ok, summary: ok ? `Contract approved (${c.clauses.length} clauses)` : 'Contract declined' });
       if (!ok) return { status: 'deny', reason: 'The user declined this contract. Ask what they expect, or propose a corrected contract.' };
       this.runs.contract = c;
+      // Pin what the approved checks execute, so they cannot be passed by editing them.
+      if (this.index) {
+        try {
+          pinVerifiers(c, this.workspaceView(await this.index.ready()));
+          if (c.verifiers?.size) audit.record('contract.verifiers_pinned', { files: [...c.verifiers.keys()] });
+        } catch (e) {
+          this.log.appendLine(`[contract] verifier pinning skipped: ${(e as Error).message}`);
+        }
+      }
       sink.emit({ t: 'contract', phase: 'approved', clauses: contractCard(c) });
       return { status: 'allow' };
     }
@@ -425,6 +450,12 @@ export class AgentRunner {
       const prepared = await prepareWrite(info.name, info.args);
       // Negative-scope clauses of the approved contract are enforced before the user sees anything.
       const forbid = 'error' in prepared ? undefined : forbiddenBy(this.runs.contract, prepared.rel);
+      const weaken = 'error' in prepared ? undefined : verifierWriteViolation(this.runs.contract, prepared.rel, prepared.proposed);
+      if (weaken) {
+        audit.record('contract.verifier_write_blocked', { path: (prepared as any).rel });
+        sink.emit({ t: 'approval.resolved', id, allowed: false, summary: `Blocked: would weaken an approved check (${(prepared as any).rel})` });
+        return { status: 'deny', reason: `Blocked by the intent contract's verifier integrity: ${weaken}.` };
+      }
       if (forbid) {
         audit.record('contract.forbidden_write', { path: (prepared as any).rel, clause: forbid.id });
         sink.emit({ t: 'approval.resolved', id, allowed: false, summary: `Blocked by contract ${forbid.id}: ${forbid.text}` });
@@ -484,8 +515,8 @@ export class AgentRunner {
             sink.emit({ t: 'contract', phase: 'live', clauses: contractCard(c) });
           }
         }
-        const written = info.name === 'create_file' ? String(info.args?.content ?? '') : String(info.args?.new_string ?? '');
-        this.runs.ledger.record(prepared.rel, 1, written, 'own_edit');
+        // Only the hunks that actually landed count as the model's own (observed) content.
+        if (added) this.runs.ledger.record(prepared.rel, 1, added, 'own_edit');
       }
       const summary = describeReview(prepared.rel, review);
       if (signal.aborted || review.status === 'cancelled') return { status: 'deny', reason: 'Run cancelled by the user.' };
@@ -528,12 +559,29 @@ export class AgentRunner {
       sink.emit({ t: 'approval', id, name: info.name, summary: `Run: ${cmd}`, risk });
       const ok = await this.raceAbort(sink.approveCommand(id, cmd, risk), signal, false);
       audit.record('approval', { tool: 'run_command', command: cmd, risk: risk.risk, reasons: risk.reasons, allowed: ok });
-      if (ok) this.runs.approveCommand(cmd, binding);
+      // Always record the binding (possibly empty) so use-time re-derivation can detect agent-written
+      // files that enter the execution set after this approval.
+      if (ok) this.runs.approveCommand(cmd, binding ?? {});
       sink.emit({ t: 'approval.resolved', id, allowed: ok, summary: ok ? `Approved: ${cmd}` : `Denied: ${cmd}` });
       return ok ? { status: 'allow' } : { status: 'deny', reason: 'The user declined to run this command.' };
     }
-    // Read-only or harness tools that ended up gated: allow.
-    return { status: 'allow' };
+    // Any other gated tool (third-party MCP or harness tool): never auto-allowed. Credentials (decoys)
+    // in its arguments are refused outright; otherwise the user decides.
+    const argText = JSON.stringify(info.args ?? {});
+    const leaks = vault.scan(argText);
+    if (leaks.length) {
+      audit.record('exfil.blocked', { sink: `${info.server ?? 'tool'}.${info.name}`, labels: leaks.map((l) => l.entry.label) });
+      sink.emit({ t: 'notice', level: 'error', text: `Blocked ${info.server ?? ''}${info.server ? '.' : ''}${info.name}: its arguments carry a ${describeHit(leaks[0])}.` });
+      sink.emit({ t: 'approval.resolved', id, allowed: false, summary: `Blocked: arguments carry a ${describeHit(leaks[0])}` });
+      return { status: 'deny', reason: `Blocked by Anvil: the arguments contain a credential (${describeHit(leaks[0])}). Do not send credentials to tools.` };
+    }
+    const label = `${info.server ? info.server + '.' : ''}${info.name}`;
+    const risk: CommandRisk = { risk: 'medium', reasons: [`gated tool ${label} (not an Anvil tool)`, `arguments: ${argText.slice(0, 300)}`] };
+    sink.emit({ t: 'approval', id, name: info.name, summary: `Allow ${label}?`, risk });
+    const ok = await this.raceAbort(sink.approveCommand(id, `${label} ${argText.slice(0, 200)}`, risk), signal, false);
+    audit.record('approval', { tool: label, allowed: ok });
+    sink.emit({ t: 'approval.resolved', id, allowed: ok, summary: ok ? `Allowed ${label}` : `Denied ${label}` });
+    return ok ? { status: 'allow' } : { status: 'deny', reason: `The user declined ${label}.` };
   }
 
   /**
@@ -638,17 +686,35 @@ function messageText(content: unknown): string {
 export function normaliseCall(tc: TrueForge.ToolCall, threadId: string): ToolCallInfo {
   const rawName = tc.function?.name ?? '';
   let args: any = parseArgs(tc.function?.arguments);
-  let name = (tc.toolInfo as any)?.type === 'mcp' ? (tc.toolInfo as any).name : rawName;
-  name = name.replace(/^.*(__|\.|\/)/, '');
+  const ti = tc.toolInfo as any;
+  let qualified = ti?.type === 'mcp' ? String(ti.name ?? rawName) : rawName;
+  let server: string | undefined = ti?.serverName ? String(ti.serverName) : undefined;
+  const split = (q: string) => {
+    const m = q.match(/^(.*?)(?:__|\.|\/)([^_./][^./]*)$/);
+    return m ? { server: m[1], name: m[2] } : { server: undefined, name: q };
+  };
+  let s = split(qualified);
+  let name = s.name;
+  server ??= s.server;
   if (name === 'call_tool') {
     const inner = args?.tool_name ?? args?.name ?? args?.tool;
     const innerArgs = args?.arguments ?? args?.args ?? args?.input ?? args?.parameters;
     if (inner) {
-      name = String(inner).replace(/^.*(__|\.|\/)/, '');
+      s = split(String(inner));
+      name = s.name;
+      server = args?.server_name ?? args?.server ?? s.server ?? server;
       args = parseArgs(innerArgs);
     }
   }
-  return { id: tc.id, threadId, rawName, name, args };
+  return { id: tc.id, threadId, server, rawName, name, args };
+}
+
+/** Tool names that only Anvil's own MCP server may provide. */
+const ANVIL_TOOLS = new Set(['edit_file', 'create_file', 'run_command', 'propose_contract', 'check_contract', 'read_file', 'search_code', 'find_symbol', 'retrieve_context', 'list_files', 'repo_map', 'get_diagnostics']);
+
+/** True if the call claims an Anvil tool name but comes from a different MCP server (tool shadowing). */
+export function isShadowing(info: { server?: string; name: string }, ownServer: string): boolean {
+  return !!info.server && info.server !== ownServer && ANVIL_TOOLS.has(info.name);
 }
 
 function parseArgs(a: unknown): any {

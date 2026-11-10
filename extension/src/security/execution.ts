@@ -285,6 +285,64 @@ export function reviewExecution(command: string, ws: WorkspaceView, agentWrites:
   return { modified, binding, risk, reasons };
 }
 
+/** Workspace as it is on disk now: given files plus build/test/hook config the code index may skip. */
+export function diskView(root: string, files: Iterable<string>): WorkspaceView {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const fs = require('node:fs') as typeof import('node:fs');
+  const p = require('node:path') as typeof import('node:path');
+  const read = (rel: string) => {
+    try {
+      return fs.readFileSync(p.join(root, rel), 'utf8');
+    } catch {
+      return undefined;
+    }
+  };
+  const set = new Set(files);
+  for (const extra of ['Makefile', 'makefile', 'GNUmakefile', '.envrc', 'package.json', 'pyproject.toml', 'setup.cfg', 'tox.ini', 'pytest.ini', 'conftest.py', '.pre-commit-config.yaml']) {
+    if (root && fs.existsSync(p.join(root, extra))) set.add(extra);
+  }
+  return { files: () => [...set], read };
+}
+
+/**
+ * Use-time re-derivation: recomputes, immediately before the process is spawned, which
+ * agent-written files the command will execute, and compares with what the user approved.
+ * Catches (a) bound files whose content changed and (b) agent-written files that entered the
+ * execution set after approval (e.g. a conftest.py the agent created later).
+ */
+export function verifyAtUse(
+  command: string,
+  ws: WorkspaceView,
+  agentWrites: Map<string, string>,
+  approved: Record<string, string>,
+): { ok: boolean; changed: string[]; added: string[] } {
+  const now = reviewExecution(command, ws, agentWrites);
+  const changed = Object.entries(approved)
+    .filter(([path, h]) => {
+      const cur = ws.read(path);
+      return cur === undefined || sha(cur) !== h;
+    })
+    .map(([path]) => path);
+  const added = now.modified.map((m) => m.path).filter((path) => !(path in approved));
+  return { ok: !changed.length && !added.length, changed, added };
+}
+
+/** Cheap fingerprint of files (mtime+size) to find what a command modified. */
+export function fingerprint(root: string, files: Iterable<string>): Map<string, string> {
+  const fs = require('node:fs') as typeof import('node:fs');
+  const p = require('node:path') as typeof import('node:path');
+  const out = new Map<string, string>();
+  for (const f of files) {
+    try {
+      const st = fs.statSync(p.join(root, f));
+      if (st.isFile()) out.set(f, `${st.mtimeMs}:${st.size}`);
+    } catch {
+      /* missing */
+    }
+  }
+  return out;
+}
+
 /** True if every bound file still has the hash it had when the command was approved. */
 export function bindingHolds(binding: Record<string, string>, read: (path: string) => string | undefined): { ok: boolean; changed: string[] } {
   const changed = Object.entries(binding)

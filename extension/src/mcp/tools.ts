@@ -6,7 +6,8 @@ import { z } from 'zod';
 import { badSegment, classifyPath, editWarnings, isSecretPath, safeRegex, sanitizeTerminal, scrubEnv } from '../security/policy';
 import { audit } from '../security/audit';
 import { describeHit, vault } from '../security/honeytoken';
-import { bindingHolds } from '../security/execution';
+import { diskView, fingerprint, verifyAtUse } from '../security/execution';
+import { execFileSync } from 'node:child_process';
 import { ContractEnv, evaluate } from '../review/contract';
 import { readFileSync } from 'node:fs';
 import { WorkspaceIndex } from '../context/workspaceIndex';
@@ -403,22 +404,21 @@ export const TOOLS: ToolDef[] = [
         audit.record('exfil.blocked', { sink: 'run_command', labels: leaks.map((l) => l.entry.label), encodings: leaks.map((l) => l.encoding) });
         return `Blocked: this command carries a ${describeHit(leaks[0])}. Anvil never lets credentials leave through agent commands.`;
       }
-      // Edit-to-execution binding: the approval covered specific contents of the agent-modified
-      // files this command runs. If any changed since, the approval no longer describes what runs.
+      // Edit-to-execution binding, re-derived immediately before the process is spawned: the
+      // approval covered specific contents of the agent-written files this command runs. If one
+      // changed, or another agent-written file has since entered what the command runs, the
+      // approval no longer describes what would execute.
+      const root = workspaceRoot()!.fsPath;
+      const idx = await d.index.ready();
       const binding = d.runs.peekBinding(String(a.command ?? ''));
-      if (binding && Object.keys(binding).length) {
-        const root = workspaceRoot()!.fsPath;
-        const held = bindingHolds(binding, (p) => {
-          try {
-            return readFileSync(path.join(root, p), 'utf8');
-          } catch {
-            return undefined;
-          }
-        });
-        if (!held.ok) {
+      if (binding && d.runs.agentWrites.size) {
+        const ws = diskView(root, [...idx.files.keys(), ...d.runs.agentWrites.keys()]);
+        const v = verifyAtUse(String(a.command ?? ''), ws, d.runs.agentWrites, binding);
+        if (!v.ok) {
           d.runs.isCommandApproved(String(a.command ?? '')); // consume the now-invalid approval
-          audit.record('blocked.command', { command: a.command, reason: 'bound files changed after approval', changed: held.changed });
-          return `Command not executed: ${held.changed.join(', ')} changed after the user approved this command, so the approval no longer covers the code it would run. Ask again.`;
+          audit.record('blocked.command', { command: a.command, reason: 'execution binding violated at use', changed: v.changed, added: v.added });
+          const why = [v.changed.length ? `${v.changed.join(', ')} changed after approval` : '', v.added.length ? `${v.added.join(', ')} (written by the agent) would now also run` : ''].filter(Boolean).join('; ');
+          return `Command not executed: ${why}, so the user's approval no longer covers the code it would run. Ask again.`;
         }
       }
       if (!d.runs.isCommandApproved(String(a.command ?? ''))) {
@@ -430,7 +430,35 @@ export const TOOLS: ToolDef[] = [
           return 'Command not executed: it was not approved by the user.';
         }
       }
-      return d.terminal.run(a.command, (a.timeout_s ?? 120) * 1000, run.abort.signal);
+      // Snapshot before running: files the command itself writes (sed -i, generators, formatters)
+      // become agent-written too, so a later command cannot run them unbound.
+      const tracked = [...new Set([...idx.files.keys(), ...d.runs.agentWrites.keys()])];
+      const before = fingerprint(root, tracked);
+      const untrackedBefore = new Set(untracked(root));
+      const out = await d.terminal.run(a.command, (a.timeout_s ?? 120) * 1000, run.abort.signal);
+      const after = fingerprint(root, tracked);
+      const touched = tracked.filter((f) => before.get(f) !== after.get(f) && after.has(f));
+      for (const f of untracked(root)) if (!untrackedBefore.has(f) && !before.has(f)) touched.push(f);
+      const kept: string[] = [];
+      for (const f of touched.slice(0, 200)) {
+        // Skip noisy build/cache dirs, but NOT implicit-execution surfaces inside them: a .pth file
+        // or sitecustomize.py auto-runs on every Python start, a .git/hooks script runs on every
+        // commit, and node_modules/.bin shims run whenever their command name is invoked. Letting an
+        // agent plant those unbound would defeat the edit-to-execution binding (P4) entirely.
+        const implicitExec = /(^|\/)\.venv\/.*\.pth$|(^|\/)(\.venv|venv|env)\/.*sitecustomize\.py$|(^|\/)\.git\/hooks\/[^./]+$|(^|\/)node_modules\/\.bin\//.test(f);
+        if (!implicitExec && /(^|\/)(__pycache__|node_modules|\.git|\.venv|venv|dist|build|out|\.pytest_cache|coverage)(\/|$)|\.(pyc|log|lock)$/.test(f)) continue;
+        try {
+          d.runs.recordAgentWrite(f, readFileSync(path.join(root, f), 'utf8').slice(0, 100_000));
+          kept.push(f);
+        } catch {
+          /* unreadable / binary */
+        }
+      }
+      if (kept.length) {
+        audit.record('command.modified_files', { command: a.command, files: kept });
+        return `${out}\n[Anvil: this command modified ${kept.length} file(s): ${kept.slice(0, 10).join(', ')}${kept.length > 10 ? ' …' : ''}. They are now tracked as agent-written; commands that run them need a fresh approval bound to their contents.]`;
+      }
+      return out;
     },
   },
 ];
@@ -481,6 +509,17 @@ async function runWrite(tool: string, args: any, d: ToolDeps): Promise<string> {
   const res = await d.reviews.review(prepared.uri, prepared.original, prepared.proposed, { runId: run.id, title: `${tool} ${rel}`, isNewFile: prepared.isNewFile, warnings: prepared.warnings });
   if (run.cancelled) return 'The run was cancelled by the user. Pending hunks were discarded.';
   return describeReview(rel, res);
+}
+
+/** New untracked (not ignored) files, via git when available. */
+function untracked(root: string): string[] {
+  try {
+    return execFileSync('git', ['ls-files', '--others', '--exclude-standard'], { cwd: root, encoding: 'utf8', windowsHide: true, timeout: 5000 })
+      .split(/\r?\n/)
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
 }
 
 function globToRe(glob: string): RegExp {

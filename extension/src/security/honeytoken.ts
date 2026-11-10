@@ -87,9 +87,31 @@ export class HoneyVault {
   private byDecoy = new Map<string, VaultEntry>();
   private byReal = new Map<string, VaultEntry>();
   private key: Buffer;
+  /** Called when a new decoy is minted (used to persist the decoy list). */
+  onMint?: () => void;
 
   constructor(key?: Buffer) {
     this.key = key ?? randomBytes(32);
+  }
+
+  /**
+   * Installs a persistent key (kept in the editor's secret storage), so the same secret maps to the
+   * same decoy across editor restarts and resumed agent sessions.
+   */
+  setKey(key: Buffer) {
+    this.key = key;
+  }
+
+  /** Decoys only (never the real values): persisted so sinks still recognise them after a restart. */
+  exportDecoys(): { decoy: string; label: string }[] {
+    return [...this.byDecoy.values()].map((e) => ({ decoy: e.decoy, label: e.label }));
+  }
+
+  /** Re-registers persisted decoys; their real value is recovered on demand (see rehydrateFor). */
+  importDecoys(list: { decoy: string; label: string }[]) {
+    for (const d of list ?? []) {
+      if (d?.decoy && !this.byDecoy.has(d.decoy)) this.byDecoy.set(d.decoy, { decoy: d.decoy, real: '', label: d.label, firstSeen: 0 });
+    }
   }
 
   get size() {
@@ -152,6 +174,7 @@ export class HoneyVault {
           e = { decoy, real: m, label: kind.label, firstSeen: Date.now() };
           this.byReal.set(m, e);
           this.byDecoy.set(decoy, e);
+          this.onMint?.();
           // Connection strings: the password part alone is also a decoy token.
           if (kind.label === 'connection-string-credentials') {
             const realPw = m.match(/:([^\s:/@]+)@$/)?.[1];
@@ -218,6 +241,9 @@ export class HoneyVault {
    * Returns the text plus any decoys that would have carried a secret somewhere new.
    */
   rehydrateFor(text: string, targetCurrent: string): { text: string; rehydrated: number; foreign: VaultEntry[] } {
+    // Register the target's own secrets first: with a persistent key this recovers the real value of
+    // decoys minted in an earlier editor session (they map deterministically).
+    if (this.byDecoy.size) this.substitute(targetCurrent);
     let out = text;
     let rehydrated = 0;
     const foreign: VaultEntry[] = [];
@@ -225,7 +251,7 @@ export class HoneyVault {
     const entries = [...this.byDecoy.values()].sort((a, b) => b.decoy.length - a.decoy.length);
     for (const e of entries) {
       if (!out.includes(e.decoy)) continue;
-      if (targetCurrent.includes(e.real)) {
+      if (e.real && targetCurrent.includes(e.real)) {
         out = out.split(e.decoy).join(e.real);
         rehydrated++;
       } else foreign.push(e);

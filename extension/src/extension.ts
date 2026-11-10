@@ -1,3 +1,4 @@
+import { vault } from './security/honeytoken';
 import * as vscode from 'vscode';
 import { randomBytes } from 'node:crypto';
 import { WorkspaceIndex } from './context/workspaceIndex';
@@ -44,6 +45,20 @@ export async function activate(ctx: vscode.ExtensionContext) {
 
   // Per-install secret so only TrueForge (which we hand it to) can call the editor's tools.
   // Kept in the OS keychain via SecretStorage (migrated from older globalState storage).
+  // Honeytoken key + decoy list survive restarts: a resumed agent session may still hold decoys.
+  let hk = await ctx.secrets.get('anvil.honeytokenKey');
+  if (!hk) {
+    hk = randomBytes(32).toString('base64');
+    await ctx.secrets.store('anvil.honeytokenKey', hk);
+  }
+  vault.setKey(Buffer.from(hk, 'base64'));
+  vault.importDecoys(ctx.workspaceState.get<{ decoy: string; label: string }[]>('anvil.decoys') ?? []);
+  let decoySave: NodeJS.Timeout | undefined;
+  vault.onMint = () => {
+    clearTimeout(decoySave);
+    decoySave = setTimeout(() => void ctx.workspaceState.update('anvil.decoys', vault.exportDecoys().slice(-5000)), 500);
+  };
+
   let token = await ctx.secrets.get('anvil.mcpToken');
   if (!token) {
     token = ctx.globalState.get<string>('anvil.mcpToken') ?? randomBytes(32).toString('hex');

@@ -40,6 +40,81 @@ export interface Contract {
   results: Map<string, ClauseResult>;
   /** Hunk-level traceability: clause id → files/edits that claimed to serve it. */
   servedBy: Map<string, string[]>;
+  /**
+   * Verifier integrity: the files the approved check commands execute, pinned at approval.
+   * "config" verifiers (conftest.py, pytest/tox/npm config, scripts) must stay byte-identical;
+   * "test" verifiers may only grow (existing lines kept), so a check cannot be passed by weakening it.
+   */
+  verifiers?: Map<string, { role: 'config' | 'test'; text: string; clauses: string[] }>;
+}
+
+import { EXEC_CONFIG, WorkspaceView, resolveExecutionSet } from '../security/execution';
+
+const TEST_FILE = /(^|\/)(test_[^/]*\.py|[^/]*_test\.py|[^/]*\.(test|spec)\.[cm]?[jt]sx?)$/;
+
+/** Pins every config/test file the contract's commands execute (called when the user approves it). */
+export function pinVerifiers(c: Contract, ws: WorkspaceView) {
+  const pins = new Map<string, { role: 'config' | 'test'; text: string; clauses: string[] }>();
+  for (const cl of c.clauses) {
+    if (cl.check.type !== 'command_succeeds' && cl.check.type !== 'command_output') continue;
+    const set = resolveExecutionSet(cl.check.command, ws);
+    for (const p of set.files) {
+      const role = EXEC_CONFIG.test(p) ? 'config' : TEST_FILE.test(p) ? 'test' : undefined;
+      if (!role) continue;
+      const text = ws.read(p);
+      if (text === undefined) continue;
+      const prev = pins.get(p);
+      if (prev) prev.clauses.push(cl.id);
+      else pins.set(p, { role, text: text.replace(/\r\n/g, '\n'), clauses: [cl.id] });
+    }
+  }
+  c.verifiers = pins;
+}
+
+/** Original lines (non-blank) that are no longer present in `current` (multiset semantics). */
+function removedLines(original: string, current: string): string[] {
+  const have = new Map<string, number>();
+  for (const l of current.replace(/\r\n/g, '\n').split('\n')) {
+    const k = l.trim();
+    if (k) have.set(k, (have.get(k) ?? 0) + 1);
+  }
+  const out: string[] = [];
+  for (const l of original.split('\n')) {
+    const k = l.trim();
+    if (!k) continue;
+    const n = have.get(k) ?? 0;
+    if (n > 0) have.set(k, n - 1);
+    else out.push(k);
+  }
+  return out;
+}
+
+/** Verifier files whose integrity is broken in the current workspace. */
+export function verifierViolations(c: Contract, read: (p: string) => string | undefined): { path: string; clauses: string[]; detail: string }[] {
+  const out: { path: string; clauses: string[]; detail: string }[] = [];
+  for (const [p, v] of c.verifiers ?? []) {
+    const cur = read(p);
+    if (cur === undefined) {
+      out.push({ path: p, clauses: v.clauses, detail: `${p} (a file the approved check runs) was deleted` });
+      continue;
+    }
+    if (v.role === 'config') {
+      if (cur.replace(/\r\n/g, '\n') !== v.text) out.push({ path: p, clauses: v.clauses, detail: `${p} (test/build configuration the check runs) was modified` });
+    } else {
+      const gone = removedLines(v.text, cur);
+      if (gone.length) out.push({ path: p, clauses: v.clauses, detail: `existing test code in ${p} was changed or removed (e.g. "${gone[0].slice(0, 80)}") — tests may be added, not weakened` });
+    }
+  }
+  return out;
+}
+
+/** Write-gate check: would this proposed content break a pinned verifier? */
+export function verifierWriteViolation(c: Contract | undefined, rel: string, proposed: string): string | undefined {
+  const v = c?.verifiers?.get(rel);
+  if (!v) return undefined;
+  if (v.role === 'config') return `${rel} is executed by the approved checks (${v.clauses.join(', ')}); changing it could make them pass without the behaviour being right`;
+  const gone = removedLines(v.text, proposed);
+  return gone.length ? `this edit changes or removes existing test code in ${rel} ("${gone[0].slice(0, 80)}"), which the approved checks (${v.clauses.join(', ')}) rely on; add new tests instead of altering existing ones` : undefined;
 }
 
 export interface ContractEnv {
@@ -141,6 +216,10 @@ export async function evaluate(c: Contract, env: ContractEnv, opts: { commands: 
         r = { id: cl.id, state: hit !== !!k.absent ? 'pass' : 'fail', detail: `\`${k.command}\` output ${hit ? 'matches' : 'does not match'} /${k.pattern}/${hit !== !!k.absent ? '' : '\n' + tail}` };
       }
     } else r = c.results.get(cl.id) ?? r; // command checks keep their last result between edits
+    // Verifier integrity outranks the exit code: a check that passes because its own test or
+    // configuration was altered does not count.
+    const broken = verifierViolations(c, env.read).filter((v) => v.clauses.includes(cl.id));
+    if (broken.length) r = { id: cl.id, state: 'fail', detail: `verifier changed: ${broken.map((b) => b.detail).join('; ')}` };
     c.results.set(cl.id, r);
     out.push(r);
   }
