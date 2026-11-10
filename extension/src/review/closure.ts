@@ -83,11 +83,22 @@ function refsIn(lang: Lang, lines: string[]): Set<string> {
   return out;
 }
 
+/** Def/function signatures in `lines`, including ones whose parameter list spans multiple lines. */
 function defSigs(lines: string[]): Map<string, string> {
   const out = new Map<string, string>();
-  for (const l of lines) {
-    const m = l.match(/^\s*(?:async\s+)?def\s+(\w+)\s*\(([^)]*)\)?/) ?? l.match(/^\s*(?:export\s+)?(?:async\s+)?function\s+([\w$]+)\s*\(([^)]*)\)?/);
-    if (m) out.set(m[1], m[2].replace(/\s+/g, ''));
+  const text = lines.join('\n');
+  const re = /^[ \t]*(?:async\s+)?def\s+(\w+)\s*\(|^[ \t]*(?:export\s+)?(?:async\s+)?function\s+([\w$]+)\s*\(/gm;
+  for (const m of text.matchAll(re)) {
+    const name = m[1] ?? m[2];
+    const start = m.index! + m[0].length;
+    let depth = 1;
+    let i = start;
+    while (i < text.length && depth > 0) {
+      if (text[i] === '(') depth++;
+      else if (text[i] === ')') depth--;
+      i++;
+    }
+    out.set(name, text.slice(start, i - 1).replace(/\s+/g, ''));
   }
   return out;
 }

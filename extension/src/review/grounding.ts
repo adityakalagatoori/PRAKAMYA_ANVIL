@@ -195,11 +195,20 @@ interface DefSig {
   name: string;
   sig: string;
 }
+/** Defs in `lines`, including signatures that span multiple lines (matched by paren balance, not a single-line regex). */
 function defsIn(lines: string[]): DefSig[] {
   const out: DefSig[] = [];
-  for (const l of lines) {
-    const m = l.match(/^\s*(?:async\s+)?def\s+(\w+)\s*\(([^)]*)\)?/);
-    if (m) out.push({ name: m[1], sig: m[2].replace(/\s+/g, '') });
+  const text = lines.join('\n');
+  for (const m of text.matchAll(/^[ \t]*(?:async\s+)?def\s+(\w+)\s*\(/gm)) {
+    const start = m.index! + m[0].length;
+    let depth = 1;
+    let i = start;
+    while (i < text.length && depth > 0) {
+      if (text[i] === '(') depth++;
+      else if (text[i] === ')') depth--;
+      i++;
+    }
+    out.push({ name: m[1], sig: text.slice(start, i - 1).replace(/\s+/g, '') });
   }
   return out;
 }
@@ -306,6 +315,25 @@ export function assessAdmission(
         continue;
       }
       flag(s, n, a.line, s === 'stale' ? 'the model saw an older version of this definition' : `defined in ${d.path}:${d.line}, never shown to the model`, { path: d.path, line: d.line });
+    }
+    // 2b. self.X() / cls.X() must resolve to a method of the enclosing class (or anywhere, as a
+    // fallback when the class can't be identified). Plain attribute calls on other objects are
+    // deliberately left to the generic check below: Anvil has no type information to know what a
+    // third-party object's own attributes are.
+    for (const m of a.code.matchAll(/\b(?:self|cls)\.([A-Za-z_]\w*)\s*\(/g)) {
+      const n = m[1];
+      if (n.startsWith('__') || newDefs.has(n) || flagged.has(n)) continue;
+      const chunk = idx.chunkAt(rel, a.line);
+      const cls = chunk?.symbol?.includes('.') ? chunk.symbol.split('.')[0] : undefined;
+      const anyDefs = idx.findSymbol(n).filter((d) => d.name === n && d.kind !== 'section');
+      if (cls) {
+        const qualified = `${cls}.${n}`;
+        const onClass = idx.findSymbol(qualified).some((d) => d.qualified.toLowerCase() === qualified.toLowerCase());
+        if (onClass) continue;
+      } else if (anyDefs.length) continue; // can't tell the class, but the method exists somewhere
+      if (anyDefs.length) continue; // exists on some other class: let the generic check below judge it
+      report.checked++;
+      flag('unknown', n, a.line, `no method "${n}" exists${cls ? ` on ${cls}` : ''} or anywhere in the repository`);
     }
     for (const m of a.code.matchAll(/\.([A-Za-z_]\w*)\s*\(/g)) {
       const n = m[1];

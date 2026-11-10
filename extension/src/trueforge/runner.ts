@@ -17,6 +17,7 @@ import { contractCard, contractCommands, evaluate, failing, finishGateMessage, f
 import { getConfig } from '../config';
 import { CodeIndex } from '../context/index';
 import { AdmissionReport, admissionSummary, assessAdmission, shouldHold } from '../review/grounding';
+import { dependencyHoldMessage, diskDepWorkspace, unanchoredDependencies } from '../security/dependencies';
 
 function admissionHeadline(r: AdmissionReport): string {
   const parts: string[] = [];
@@ -108,6 +109,9 @@ export class AgentRunner {
     private terminal?: CommandTerminal,
   ) {}
 
+  /** The user's own request text for the current run, so a dependency the user explicitly asked for is never held. */
+  private currentRequestText = '';
+
   private contractDeps(): ToolDeps {
     return { index: this.index as any, runs: this.runs, terminal: this.terminal as any, reviews: this.reviews, log: this.log };
   }
@@ -136,6 +140,7 @@ export class AgentRunner {
     opts: { continueConversation?: boolean; title?: string; observations?: { path: string; line: number; text: string }[] } = {},
   ): Promise<RunResult> {
     if (this.current) throw new Error('A run is already in progress. Cancel it first.');
+    this.currentRequestText = input;
     const runId = `${kind}-${Date.now().toString(36)}`;
     const run = this.runs.start(runId, { keepObservations: !!opts.continueConversation });
     // Everything placed in the prompt counts as seen by the model (context pack, selection…).
@@ -474,6 +479,21 @@ export class AgentRunner {
       if (mode !== 'off' && this.index) {
         try {
           const idx = await this.index.ready();
+          // Name-origin dependency guard: a new import/dependency with no anchor in the workspace
+          // (not stdlib, not a manifest/lockfile entry, not installed, not named by the user) is
+          // held before the human sees it — this is where a hallucinated or slopsquatted package
+          // name would otherwise slip through, since P1's own grounding skips third-party imports.
+          const root = workspaceRoot()?.fsPath;
+          if (root) {
+            const depIssues = unanchoredDependencies(prepared.rel, prepared.original, prepared.proposed, diskDepWorkspace(root), this.currentRequestText ?? '');
+            const depHolds = this.runs.admissionHolds.get('dep:' + prepared.rel) ?? 0;
+            if (mode === 'hold' && depIssues.length && depHolds < 2) {
+              this.runs.admissionHolds.set('dep:' + prepared.rel, depHolds + 1);
+              audit.record('admission.dependency_hold', { path: prepared.rel, names: depIssues.map((i) => i.name), round: depHolds + 1 });
+              sink.emit({ t: 'approval.resolved', id, allowed: false, summary: `Held: unanchored dependency ${depIssues.map((i) => i.name).join(', ')}` });
+              return { status: 'deny', reason: dependencyHoldMessage(prepared.rel, depIssues) };
+            }
+          }
           const report = assessAdmission(idx, this.runs.ledger, prepared.rel, prepared.original, prepared.proposed);
           const holds = this.runs.admissionHolds.get(prepared.rel) ?? 0;
           if (mode === 'hold' && shouldHold(report) && holds < 2) {
