@@ -18,6 +18,9 @@ import { getConfig } from '../config';
 import { CodeIndex } from '../context/index';
 import { AdmissionReport, admissionSummary, assessAdmission, shouldHold } from '../review/grounding';
 import { dependencyHoldMessage, diskDepWorkspace, unanchoredDependencies } from '../security/dependencies';
+import { parsePrintedToolCall } from '../mcp/printedToolParser';
+import { licenseContaminationIssues, formatLicenseContaminationMessage } from '../security/licenseContamination';
+import { addedText, detectAdversarialEncodings, formatAdversarialMessage } from '../security/adversarialEncoding';
 
 function admissionHeadline(r: AdmissionReport): string {
   const parts: string[] = [];
@@ -353,12 +356,34 @@ export class AgentRunner {
       }
       if (!approvals.length) {
         // Some local models (e.g. qwen2.5-coder via Ollama) print a tool call as JSON text instead of
-        // using function calling, which silently ends the loop. Detect it and nudge, at most twice.
-        if (!roundToolCalls && nudges < 2 && looksLikeTextToolCall(mainText)) {
-          nudges++;
-          sink.emit({ t: 'notice', level: 'warn', text: 'The model wrote a tool call as plain text; asking it to use real function calling…' });
-          input = [{ type: 'user.message', content: TEXT_TOOL_CALL_NUDGE }];
-          continue;
+        // using function calling, which silently ends the loop. Try to parse and route through approval gate,
+        // then nudge if parsing fails (at most twice).
+        if (!roundToolCalls && looksLikeTextToolCall(mainText)) {
+          const parsed = parsePrintedToolCall(mainText);
+          if (parsed) {
+            // Successfully parsed a printed tool call. Route it through the approval gate.
+            const syntheticId = `printed_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+            const toolInfo: ToolCallInfo = {
+              id: syntheticId,
+              threadId: 'main',
+              rawName: parsed.name,
+              name: parsed.name,
+              args: parsed.arguments,
+              server: undefined,
+            };
+            calls.set(syntheticId, toolInfo);
+            approvals.push({ id: syntheticId, threadId: 'main' });
+            sink.emit({ t: 'notice', level: 'info', text: `Parsed text-printed tool call: ${parsed.name}. Routing through approval gate.` });
+            // Don't nudge; process this parsed call through the normal approval flow
+          } else if (nudges < 2) {
+            // Parsing failed; nudge the model (at most twice)
+            nudges++;
+            sink.emit({ t: 'notice', level: 'warn', text: 'The model wrote a tool call as plain text; asking it to use real function calling…' });
+            input = [{ type: 'user.message', content: TEXT_TOOL_CALL_NUDGE }];
+            continue;
+          } else {
+            // Nudge limit reached, and no real tool calls. Continue with other logic.
+          }
         }
         // Small models sometimes stop after exploring and report findings instead of making the
         // change. If a change was requested and no write was even attempted, continue (max 2x).
@@ -494,6 +519,27 @@ export class AgentRunner {
               return { status: 'deny', reason: dependencyHoldMessage(prepared.rel, depIssues) };
             }
           }
+          // License-contamination check: proposed hunks matched against session observations
+          // for license/copyright text (not external corpus, only what this session saw).
+          const licenseIssues = licenseContaminationIssues(prepared.proposed, this.runs.ledger);
+          const licenseHolds = this.runs.admissionHolds.get('license:' + prepared.rel) ?? 0;
+          if (mode === 'hold' && licenseIssues.length && licenseHolds < 2) {
+            this.runs.admissionHolds.set('license:' + prepared.rel, licenseHolds + 1);
+            audit.record('admission.license_hold', { path: prepared.rel, issues: licenseIssues.length, round: licenseHolds + 1 });
+            sink.emit({ t: 'approval.resolved', id, allowed: false, summary: `Held: license/copyright match (${licenseIssues.length} issue(s))` });
+            return { status: 'deny', reason: formatLicenseContaminationMessage(licenseIssues) };
+          }
+          // Disguised-code check on the lines this edit adds: high severity holds, medium annotates the review.
+          const encIssues = detectAdversarialEncodings(addedText(prepared.original, prepared.proposed));
+          const encHigh = encIssues.filter((i) => i.severity === 'high');
+          const encHolds = this.runs.admissionHolds.get('encoding:' + prepared.rel) ?? 0;
+          if (mode === 'hold' && encHigh.length && encHolds < 2) {
+            this.runs.admissionHolds.set('encoding:' + prepared.rel, encHolds + 1);
+            audit.record('admission.encoding_hold', { path: prepared.rel, kinds: encIssues.map((i) => i.kind), round: encHolds + 1 });
+            sink.emit({ t: 'approval.resolved', id, allowed: false, summary: `Held: disguised or dangerous code (${encHigh.length} high-severity issue(s))` });
+            return { status: 'deny', reason: formatAdversarialMessage(encIssues) };
+          }
+          if (encIssues.length) notes.push(formatAdversarialMessage(encIssues));
           const report = assessAdmission(idx, this.runs.ledger, prepared.rel, prepared.original, prepared.proposed);
           const holds = this.runs.admissionHolds.get(prepared.rel) ?? 0;
           if (mode === 'hold' && shouldHold(report) && holds < 2) {
